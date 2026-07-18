@@ -20,7 +20,7 @@ cargo build --release -p codex-cli
 ```
 
 The resulting executable is `codex-rs/target/release/codex`.
-It reports `codex-cli 0.145.0-alpha.11-vicentes-version` so the personal build
+It reports `codex-cli 0.145.0-alpha.23-vicentes-version` so the personal build
 is distinguishable from the upstream package.
 
 ## Install locally
@@ -59,9 +59,10 @@ enabled = true
 expose_spawn_agent_model_overrides = true
 ```
 
-The feature setting forces the root session onto the v2 runtime. Spawn another
-Luna agent with a non-full-history fork because v2 deliberately rejects model
-overrides when `fork_turns = "all"`:
+The feature setting forces the root session onto the v2 runtime. V2 accepts
+explicit model and reasoning-effort overrides with full-history forks, but it
+rejects `agent_type` there. Use a non-full-history fork when selecting an agent
+type:
 
 ```json
 {
