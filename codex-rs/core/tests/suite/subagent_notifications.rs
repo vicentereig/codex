@@ -1491,6 +1491,82 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v2_spawns_luna_model_override() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "task_name": "luna_worker",
+        "model": "gpt-5.6-luna",
+        "fork_turns": "none",
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-parent-1"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V2_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-parent-1"),
+        ]),
+    )
+    .await;
+    let child_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-parent-2"),
+            ev_assistant_message("msg-parent-2", "done"),
+            ev_completed("resp-parent-2"),
+        ]),
+    )
+    .await;
+
+    let model_catalog = bundled_models_response().expect("bundled models.json should parse");
+    let test = test_codex()
+        .with_model("gpt-5.6-sol")
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.model_catalog = Some(model_catalog);
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn(TURN_1_PROMPT).await?;
+
+    let child_requests = wait_for_requests(&child_request_log).await?;
+    let child_request = child_requests
+        .last()
+        .expect("child request log should capture at least one request");
+    assert_eq!(child_request.body_json()["model"], json!("gpt-5.6-luna"));
+
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum CompletionScenario {
     Completed,
