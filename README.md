@@ -1,71 +1,143 @@
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Luna-aware Codex
 
----
+Upstream marks `gpt-5.6-luna` as a v1 multi-agent model. This personal fork lets Luna run as a `multi_agent_v2` root or child without changing the model catalog.
 
-## Quickstart
+For the product overview and official docs, see [OpenAI's Codex README](CODEX_README.md). For detailed build notes, see [LOCAL_BUILD.md](LOCAL_BUILD.md).
 
-### Installing and running Codex CLI
+## Configure it
 
-Run the following on Mac or Linux to install Codex CLI:
+Add these settings to `~/.codex/config.toml`:
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```toml
+model = "gpt-5.6-luna"
+model_reasoning_effort = "medium"
+
+[features.multi_agent_v2]
+enabled = true
+expose_spawn_agent_model_overrides = true
+max_concurrent_threads_per_session = 4
 ```
 
-Run the following on Windows to install Codex CLI:
+The thread cap includes the root agent, so `4` leaves three slots for children. `expose_spawn_agent_model_overrides` adds `model` and `reasoning_effort` to `spawn_agent`.
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+Restart Codex, then enter `/debug-config` in the TUI to inspect the loaded settings.
+
+## How v2 works
+
+The root agent delegates independent, bounded tasks, continues local work, then reviews the results. Each child gets the same tools and shares the workspace. Assign editing agents separate files because their changes appear in one working tree.
+
+`task_name` gives each child a stable path. Agents can message one another and spawn descendants; the root can send follow-up work or wait for a needed result.
+
+`fork_turns` controls conversation context, not file access:
+
+| Value | Child context | Use it when |
+| --- | --- | --- |
+| Omitted or `"all"` | Full forkable history | The task depends on decisions made across the conversation. |
+| A positive string such as `"3"` | The latest three turns | Recent context matters, but older discussion does not. |
+| `"none"` | No parent conversation | The task message stands alone. |
+
+Model and effort overrides work with all three forms. A full-history fork cannot override `agent_type`.
+
+## One delegation round
+
+Suppose the root must change a configuration loader. It can assign three side tasks:
+
+```json
+[
+  {
+    "task_name": "find_tests",
+    "message": "Find the loader tests that cover table-form feature settings. Report file paths and test names; do not edit files.",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "low",
+    "fork_turns": "none"
+  },
+  {
+    "task_name": "patch_schema",
+    "message": "Update the schema fixture for the new setting and run its focused check. Edit only the schema fixture.",
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "fork_turns": "3"
+  },
+  {
+    "task_name": "review_design",
+    "message": "Review the proposed loader change for compatibility and missing cases. Return findings only.",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "fork_turns": "all"
+  }
+]
 ```
 
-Codex CLI can also be installed via the following package managers:
+Codex issues one `spawn_agent` call per object.
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+```mermaid
+flowchart LR
+    R[Root agent<br/>plan and integrate]
+    L[Luna low<br/>find tests]
+    T[Terra high<br/>patch schema]
+    S[Sol xhigh<br/>review design]
+    O[Root agent<br/>review, test, answer]
+
+    R --> L
+    R --> T
+    R --> S
+    L -->|paths and test names| O
+    T -->|disjoint file change| O
+    S -->|risk findings| O
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+Keep work that blocks the next step with the root.
+
+## Choose a model and effort
+
+Raise effort only when the task needs more reasoning. Luna supports `low` through `max`; Terra and Sol also support `ultra`. Defaults are `medium` for Luna and Terra and `low` for Sol.
+
+| Task | Model and effort | Example |
+| --- | --- | --- |
+| Fast fact or search | Luna `low` | Locate a config key and cite its tests. |
+| Small, bounded edit | Luna `medium` | Rename a known symbol and run one focused test. |
+| Routine repository work | Terra `medium` | Add validation in one crate with tests. |
+| Multi-file debugging | Terra `high` | Trace a setting from TOML through runtime state. |
+| Hard design or review | Sol `high` | Find compatibility risks in a protocol change. |
+| Architecture and synthesis | Sol `xhigh` | Split a cross-crate migration into safe stages. |
+| Parallel coordination | Sol `ultra` | Coordinate independent research, implementation, and review tracks. |
+
+Use `max` only when `xhigh` cannot resolve an ambiguous problem.
+
+## Build and install
+
+Install the prerequisites listed in [LOCAL_BUILD.md](LOCAL_BUILD.md), then build and install the fork:
+
+```sh
+cd codex-rs
+cargo build --release -p codex-cli
+mkdir -p "$HOME/.local/bin"
+install -m 0755 target/release/codex "$HOME/.local/bin/codex"
+hash -r
 ```
 
-Then simply run `codex` to get started.
+Keep `~/.local/bin` before package-manager paths. Then run:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```sh
+command -v codex
+codex --version
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+The path should be `~/.local/bin/codex`; the version should end in `vicentes-version`.
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+## Rebase on upstream
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Keep `origin` on this fork and `upstream` on `openai/codex`:
 
-</details>
+```sh
+git fetch upstream
+git rebase upstream/main
+cd codex-rs
+just fmt
+just test -p codex-core
+git push --force-with-lease origin main
+```
 
-### Using Codex with your ChatGPT plan
+Review the Luna exception after each rebase.
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
+This repository retains Codex's [Apache-2.0 license](LICENSE).
