@@ -1,6 +1,6 @@
 [package]
 name = "codex-cli"
-version.workspace = true
+version = "0.145.0-alpha.11-vicentes-version"
 edition.workspace = true
 license.workspace = true
 build = "build.rs"

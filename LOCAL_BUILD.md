@@ -20,30 +20,31 @@ cargo build --release -p codex-cli
 ```
 
 The resulting executable is `codex-rs/target/release/codex`.
+It reports `codex-cli 0.145.0-alpha.11-vicentes-version` so the personal build
+is distinguishable from the upstream package.
 
 ## Install locally
 
-Install the compiled binary without replacing an npm or Homebrew installation:
+Remove the npm distribution and install the compiled binary as the system
+`codex` command:
 
 ```sh
+npm uninstall -g @openai/codex
 mkdir -p "$HOME/.local/bin"
-install -m 0755 target/release/codex "$HOME/.local/bin/codex-luna"
-"$HOME/.local/bin/codex-luna" --version
+install -m 0755 target/release/codex "$HOME/.local/bin/codex"
+hash -r
+codex --version
 ```
 
-Run this fork explicitly with `~/.local/bin/codex-luna`. To make it the default
-`codex`, add an alias to the shell configuration:
-
-```sh
-alias codex="$HOME/.local/bin/codex-luna"
-```
+Ensure `~/.local/bin` precedes other package-manager binary directories in
+`PATH`. A clean login shell should resolve `codex` to `~/.local/bin/codex`.
 
 Rebuild and reinstall after changing or updating the fork:
 
 ```sh
 cd codex-rs
 cargo build --release -p codex-cli
-install -m 0755 target/release/codex "$HOME/.local/bin/codex-luna"
+install -m 0755 target/release/codex "$HOME/.local/bin/codex"
 ```
 
 ## Configure Luna subagents
