@@ -260,7 +260,12 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
     let mut config = (*turn.config).clone();
     let provider_info =
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["ollama"].clone();
@@ -3196,6 +3201,121 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
         }
     );
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_returns_targeted_terminal_statuses() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.min_wait_timeout_ms = 1;
+    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
+    config.multi_agent_v2.default_wait_timeout_ms = 1;
+    set_turn_config(&mut turn, config.clone());
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "boot worker", "task_name": "worker"})),
+        ))
+        .await
+        .expect("worker should spawn");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let mut status_rx = manager
+        .agent_control()
+        .subscribe_status(agent_id)
+        .await
+        .expect("target status should be subscribable");
+    manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist")
+        .submit(Op::Shutdown {})
+        .await
+        .expect("worker should shut down");
+    timeout(Duration::from_secs(/*secs*/ 1), status_rx.changed())
+        .await
+        .expect("target shutdown status should arrive");
+
+    let output = WaitAgentHandlerV2::default()
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": ["/root/worker"],
+                "timeout_ms": 1_000
+            })),
+        ))
+        .await
+        .expect("targeted wait should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::TargetWaitAgentResult =
+        serde_json::from_str(&content).expect("targeted wait result should be json");
+    assert_eq!(
+        result.changed,
+        vec![
+            crate::tools::handlers::multi_agents_v2::wait::ChangedAgent {
+                agent: "/root/worker".to_string(),
+                status: AgentStatus::Shutdown,
+            }
+        ]
+    );
+    assert!(!result.timed_out);
+    assert!(!result.interrupted);
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_rejects_the_root_target() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let Err(err) = WaitAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({"targets": ["/root"]})),
+        ))
+        .await
+    else {
+        panic!("root target should fail");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel("root is not a spawned agent".to_string())
+    );
 }
 
 #[tokio::test]
