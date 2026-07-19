@@ -1,6 +1,7 @@
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::AgentStatus;
 use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 
 use crate::context::ContextualUserFragment;
@@ -8,9 +9,7 @@ use crate::context::InterAgentCompletionMessage;
 use crate::context::SubagentNotification;
 
 const COMPLETION_MESSAGE_MAX_TOKENS: usize = 1_000;
-const COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE: usize = 100;
-const ERROR_MAX_TOKENS: usize =
-    COMPLETION_MESSAGE_MAX_TOKENS - COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE;
+const COMPLETION_MESSAGE_TOKEN_SAFETY_RESERVE: usize = 32;
 const ERROR_NEXT_ACTION: &str = "This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task.";
 
 // Helpers for model-visible session state markers that are stored in user-role
@@ -30,10 +29,21 @@ pub(crate) fn format_inter_agent_completion_message(
     status: &AgentStatus,
 ) -> Option<String> {
     let payload = match status {
-        AgentStatus::Completed(Some(message)) => message.clone(),
+        AgentStatus::Completed(Some(message)) => truncate_text(
+            message,
+            TruncationPolicy::Tokens(completion_payload_max_tokens(&task_name, &sender, "")),
+        ),
         AgentStatus::Completed(None) => String::new(),
         AgentStatus::Errored(error) => {
-            let error = truncate_text(error, TruncationPolicy::Tokens(ERROR_MAX_TOKENS));
+            let error_envelope = format!("Agent errored: \n\n{ERROR_NEXT_ACTION}");
+            let error = truncate_text(
+                error,
+                TruncationPolicy::Tokens(completion_payload_max_tokens(
+                    &task_name,
+                    &sender,
+                    &error_envelope,
+                )),
+            );
             format!("Agent errored: {error}\n\n{ERROR_NEXT_ACTION}")
         }
         AgentStatus::Shutdown => "Agent shut down.".to_string(),
@@ -41,6 +51,19 @@ pub(crate) fn format_inter_agent_completion_message(
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
     };
     Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
+}
+
+fn completion_payload_max_tokens(
+    task_name: &AgentPath,
+    sender: &AgentPath,
+    payload_envelope: &str,
+) -> usize {
+    let envelope =
+        InterAgentCompletionMessage::new(task_name.clone(), sender.clone(), payload_envelope)
+            .render();
+    COMPLETION_MESSAGE_MAX_TOKENS
+        .saturating_sub(approx_token_count(&envelope))
+        .saturating_sub(COMPLETION_MESSAGE_TOKEN_SAFETY_RESERVE)
 }
 
 #[cfg(test)]
