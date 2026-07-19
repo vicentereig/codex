@@ -48,6 +48,7 @@ pub(crate) struct SpawnAgentTransaction {
     rollback_armed: bool,
     delegation_id: Option<String>,
     run_id: Option<String>,
+    state_db: Option<crate::StateDbHandle>,
     durable_version: i64,
 }
 
@@ -73,7 +74,7 @@ impl SpawnAgentTransaction {
             )
             .await;
 
-        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state.state_db())
+        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state_db.as_ref())
         {
             let bound = state_db
                 .bind_delegation(delegation_id, self.thread_id, 0, durable_now_ms())
@@ -130,7 +131,7 @@ impl SpawnAgentTransaction {
         };
         if let Err(err) = delivery_result {
             if let (Some(delegation_id), Some(state_db)) =
-                (&self.delegation_id, self.state.state_db())
+                (&self.delegation_id, self.state_db.as_ref())
             {
                 let _ = state_db
                     .transition_delegation(
@@ -146,7 +147,7 @@ impl SpawnAgentTransaction {
             return Err(err);
         }
 
-        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state.state_db())
+        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state_db.as_ref())
         {
             let _ = state_db
                 .record_delegation_delivery_receipt(
@@ -676,7 +677,7 @@ impl AgentControl {
             options.run_id.as_deref(),
             options.parent_thread_id,
             options.parent_turn_id.as_deref(),
-            state.state_db(),
+            options.state_db.as_ref(),
         ) {
             let agent_path = session_source
                 .as_ref()
@@ -790,6 +791,7 @@ impl AgentControl {
             rollback_armed: true,
             delegation_id: options.delegation_id,
             run_id: options.run_id,
+            state_db: options.state_db,
             durable_version: 0,
         })
     }

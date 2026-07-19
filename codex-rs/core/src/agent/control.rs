@@ -52,6 +52,7 @@ use tracing::warn;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
+#[cfg(test)]
 pub(crate) use self::spawn::SpawnAgentTransaction as SpawnTransaction;
 
 mod execution;
@@ -65,7 +66,7 @@ pub(crate) enum SpawnAgentForkMode {
     LastNTurns(usize),
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
@@ -77,6 +78,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) delegation_id: Option<String>,
     /// Stable run identity for retries and reconciliation.
     pub(crate) run_id: Option<String>,
+    pub(crate) state_db: Option<crate::StateDbHandle>,
 }
 
 #[derive(Clone, Debug)]

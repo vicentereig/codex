@@ -10,6 +10,7 @@ use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -126,6 +127,7 @@ async fn handle_spawn_agent(
                     environments: Some(turn.environments.to_selections()),
                     delegation_id: Some(delegation_id),
                     run_id: Some(run_id),
+                    state_db: session.services.state_db.clone(),
                 },
             ),
     )

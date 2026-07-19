@@ -7,6 +7,7 @@ use codex_tools::ToolSpec;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
@@ -240,7 +241,7 @@ impl Handler {
         session
             .emit_turn_item_started(
                 &turn,
-                TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
+                &TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                     id: call_id.clone(),
                     tool: CollabAgentTool::Wait,
                     status: CollabAgentToolCallStatus::InProgress,

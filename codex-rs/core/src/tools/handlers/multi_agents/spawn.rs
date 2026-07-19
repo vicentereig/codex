@@ -131,6 +131,7 @@ async fn handle_spawn_agent(
             environments: Some(turn.environments.to_selections()),
             delegation_id: None,
             run_id: None,
+            state_db: None,
         },
     ))
     .await

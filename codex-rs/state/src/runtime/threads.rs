@@ -267,7 +267,7 @@ impl StateRuntime {
 
     /// Bounded exponential retry delay for a delegation attempt.
     pub fn delegation_retry_delay_ms(attempt: i64) -> i64 {
-        let exponent = attempt.clamp(0, 9) as u32;
+        let exponent = attempt.clamp(0, 10) as u32;
         100_i64.saturating_mul(1_i64 << exponent).min(60_000)
     }
 

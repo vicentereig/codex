@@ -411,7 +411,7 @@ async fn terminal_acknowledgement_retains_then_collects_record() {
     );
     assert_eq!(
         runtime
-            .gc_acknowledged_delegations(12, 10)
+            .gc_acknowledged_delegations(13, 10)
             .await
             .expect("gc"),
         1

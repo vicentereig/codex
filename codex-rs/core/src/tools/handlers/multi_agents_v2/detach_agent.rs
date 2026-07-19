@@ -18,6 +18,12 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 }
 
+impl CoreToolRuntime for Handler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
+    }
+}
+
 async fn handle_detach_agent(
     invocation: ToolInvocation,
 ) -> Result<DetachAgentResult, FunctionCallError> {
