@@ -1118,6 +1118,10 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) fn state_db(&self) -> Option<StateDbHandle> {
+        self.state_db.clone()
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
     }

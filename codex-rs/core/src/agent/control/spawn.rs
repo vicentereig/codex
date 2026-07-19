@@ -11,6 +11,14 @@ struct SpawnAgentThreadInheritance {
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
 
+fn durable_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
 /// Initial input delivered after a spawned agent acquires execution capacity.
 ///
 /// V2 communication spawns keep the communication and its context paired so centralized
@@ -38,6 +46,9 @@ pub(crate) struct SpawnAgentTransaction {
     multi_agent_version: MultiAgentVersion,
     initial_input: SpawnInitialInput,
     rollback_armed: bool,
+    delegation_id: Option<String>,
+    run_id: Option<String>,
+    durable_version: i64,
 }
 
 impl SpawnAgentTransaction {
@@ -62,6 +73,41 @@ impl SpawnAgentTransaction {
             )
             .await;
 
+        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state.state_db())
+        {
+            let bound = state_db
+                .bind_delegation(delegation_id, self.thread_id, 0, durable_now_ms())
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!("failed to bind durable delegation: {err}"))
+                })?;
+            if !bound {
+                self.schedule_rollback();
+                return Err(CodexErr::Fatal(
+                    "durable delegation bind lost its compare-and-set race".to_string(),
+                ));
+            }
+            self.durable_version = 1;
+            let intent = state_db
+                .record_delegation_delivery_intent(
+                    delegation_id,
+                    self.durable_version,
+                    1,
+                    durable_now_ms(),
+                )
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!("failed to record delivery intent: {err}"))
+                })?;
+            if !intent {
+                self.schedule_rollback();
+                return Err(CodexErr::Fatal(
+                    "delivery intent compare-and-set was rejected".to_string(),
+                ));
+            }
+            self.durable_version += 1;
+        }
+
         let delivery_result = match std::mem::replace(
             &mut self.initial_input,
             SpawnInitialInput::UserInput(Vec::new()),
@@ -83,8 +129,34 @@ impl SpawnAgentTransaction {
             }
         };
         if let Err(err) = delivery_result {
+            if let (Some(delegation_id), Some(state_db)) =
+                (&self.delegation_id, self.state.state_db())
+            {
+                let _ = state_db
+                    .transition_delegation(
+                        delegation_id,
+                        self.durable_version,
+                        codex_state::DurableDelegationStatus::Running,
+                        codex_state::DurableDelegationStatus::Retryable,
+                        durable_now_ms(),
+                    )
+                    .await;
+            }
             self.schedule_rollback();
             return Err(err);
+        }
+
+        if let (Some(delegation_id), Some(state_db)) = (&self.delegation_id, self.state.state_db())
+        {
+            let _ = state_db
+                .record_delegation_delivery_receipt(
+                    delegation_id,
+                    self.durable_version,
+                    1,
+                    self.run_id.as_deref().unwrap_or("delivery-accepted"),
+                    durable_now_ms(),
+                )
+                .await;
         }
 
         self.emit_started_analytics().await;
@@ -593,6 +665,30 @@ impl AgentControl {
             agent_max_threads
         };
         let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        if let (Some(delegation_id), Some(run_id), Some(parent_thread_id), Some(state_db)) = (
+            options.delegation_id.as_deref(),
+            options.run_id.as_deref(),
+            options.parent_thread_id,
+            state.state_db(),
+        ) {
+            let agent_path = session_source
+                .as_ref()
+                .and_then(|source| source.get_agent_path())
+                .map(|path| path.to_string())
+                .unwrap_or_else(|| "/root/unknown".to_string());
+            state_db
+                .reserve_delegation(
+                    delegation_id,
+                    run_id,
+                    parent_thread_id,
+                    &agent_path,
+                    durable_now_ms(),
+                )
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!("failed to reserve durable delegation: {err}"))
+                })?;
+        }
         let inheritance = SpawnAgentThreadInheritance {
             environments: self
                 .inherited_environments_for_source(&state, session_source.as_ref())
@@ -684,6 +780,9 @@ impl AgentControl {
             multi_agent_version,
             initial_input,
             rollback_armed: true,
+            delegation_id: options.delegation_id,
+            run_id: options.run_id,
+            durable_version: 0,
         })
     }
 

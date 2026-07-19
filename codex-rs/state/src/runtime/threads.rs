@@ -100,6 +100,77 @@ impl StateRuntime {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn record_delegation_delivery_intent(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        attempt: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE delegations SET attempt = ?, delivery_receipt = NULL, status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status IN (?, ?)",
+        )
+        .bind(attempt)
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(crate::DurableDelegationStatus::Bound.as_ref())
+        .bind(crate::DurableDelegationStatus::Retryable.as_ref())
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO delegation_delivery_outbox (delivery_id, delegation_id, run_id, attempt, payload_receipt, status, version, created_at_ms, updated_at_ms) SELECT ?, delegation_id, run_id, ?, ?, 'pending', 0, ?, ? FROM delegations WHERE delegation_id = ? ON CONFLICT(delegation_id, attempt) DO NOTHING",
+            )
+            .bind(format!("{delegation_id}:{attempt}"))
+            .bind(attempt)
+            .bind(format!("{delegation_id}:{attempt}"))
+            .bind(now_ms)
+            .bind(now_ms)
+            .bind(delegation_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn record_delegation_delivery_receipt(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        attempt: i64,
+        receipt: &str,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE delegations SET delivery_receipt = ?, status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status = ?",
+        )
+        .bind(receipt)
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 1 {
+            sqlx::query(
+                "UPDATE delegation_delivery_outbox SET status = 'acked', version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND attempt = ?",
+            )
+            .bind(now_ms)
+            .bind(delegation_id)
+            .bind(attempt)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
             r#"
