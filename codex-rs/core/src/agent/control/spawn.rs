@@ -622,6 +622,8 @@ impl AgentControl {
             }
             other => (other, AgentMetadata::default()),
         };
+        agent_metadata.delegation_id = options.delegation_id.clone();
+        agent_metadata.run_id = options.run_id.clone();
         let notification_source = session_source.clone();
 
         // The same `AgentControl` is sent to spawn the thread.

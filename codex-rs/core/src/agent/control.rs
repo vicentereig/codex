@@ -71,6 +71,10 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+    /// Durable delegation identity assigned by the owning turn.
+    pub(crate) delegation_id: Option<String>,
+    /// Stable run identity for retries and reconciliation.
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -540,6 +544,8 @@ impl AgentControl {
             agent_path,
             agent_nickname,
             agent_role,
+            delegation_id: None,
+            run_id: None,
         })
     }
 

@@ -5,6 +5,101 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 impl StateRuntime {
+    /// Reserve a durable delegation before creating its child runtime.
+    pub async fn reserve_delegation(
+        &self,
+        delegation_id: &str,
+        run_id: &str,
+        parent_thread_id: ThreadId,
+        agent_path: &str,
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO delegations (delegation_id, run_id, parent_thread_id, agent_path, status, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+        )
+        .bind(delegation_id)
+        .bind(run_id)
+        .bind(parent_thread_id.to_string())
+        .bind(agent_path)
+        .bind(crate::DurableDelegationStatus::Reserved.as_ref())
+        .bind(now_ms)
+        .bind(now_ms)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    /// Bind a created child using a linearizable versioned compare-and-set.
+    pub async fn bind_delegation(
+        &self,
+        delegation_id: &str,
+        child_thread_id: ThreadId,
+        expected_version: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegations SET child_thread_id = ?, status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status = ?",
+        )
+        .bind(child_thread_id.to_string())
+        .bind(crate::DurableDelegationStatus::Bound.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(crate::DurableDelegationStatus::Reserved.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Apply one lifecycle transition. A stale version or terminal record is rejected.
+    pub async fn transition_delegation(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        expected_status: crate::DurableDelegationStatus,
+        next_status: crate::DurableDelegationStatus,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        if expected_status.is_terminal() || next_status == crate::DurableDelegationStatus::Reserved
+        {
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'detached')",
+        )
+        .bind(next_status.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(expected_status.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Fence a retrying worker by advancing the lease epoch and attempt atomically.
+    pub async fn claim_delegation_attempt(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        expected_lease_epoch: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegations SET attempt = attempt + 1, lease_epoch = lease_epoch + 1, status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND lease_epoch = ? AND status IN (?, ?)",
+        )
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(expected_lease_epoch)
+        .bind(crate::DurableDelegationStatus::Bound.as_ref())
+        .bind(crate::DurableDelegationStatus::Retryable.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
             r#"

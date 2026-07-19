@@ -107,6 +107,8 @@ async fn handle_spawn_agent(
     let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
     let delegation = turn.delegation_ledger.reserve(new_agent_path.clone()).await;
+    let delegation_id = ThreadId::new().to_string();
+    let run_id = ThreadId::new().to_string();
     let spawn_transaction = match Box::pin(
         session
             .services
@@ -121,6 +123,8 @@ async fn handle_spawn_agent(
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
                     environments: Some(turn.environments.to_selections()),
+                    delegation_id: Some(delegation_id),
+                    run_id: Some(run_id),
                 },
             ),
     )

@@ -46,6 +46,7 @@ pub use model::BackfillState;
 pub use model::BackfillStats;
 pub use model::BackfillStatus;
 pub use model::DirectionalThreadSpawnEdgeStatus;
+pub use model::DurableDelegationStatus;
 pub use model::ExtractionOutcome;
 pub use model::SortDirection;
 pub use model::SortKey;

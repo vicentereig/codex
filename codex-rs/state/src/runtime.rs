@@ -56,6 +56,8 @@ use tracing::warn;
 
 mod agent_jobs;
 mod backfill;
+#[cfg(test)]
+mod delegations_tests;
 mod external_agent_config_imports;
 mod goals;
 mod logs;
