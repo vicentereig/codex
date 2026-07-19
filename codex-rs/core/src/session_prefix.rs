@@ -1,5 +1,6 @@
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
@@ -49,6 +50,28 @@ pub(crate) fn format_inter_agent_completion_message(
         AgentStatus::Shutdown => "Agent shut down.".to_string(),
         AgentStatus::NotFound => "Agent was not found.".to_string(),
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
+    };
+    Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
+}
+
+/// Renders the terminal outcome of a child turn that remains available for follow-up work.
+///
+/// Interrupted child threads are intentionally not terminal `AgentStatus` values: their parent
+/// can send a later follow-up task. Their interrupted turn is nevertheless a terminal outcome
+/// that the parent must see, including when the interruption was caused by a budget limit.
+pub(crate) fn format_inter_agent_aborted_message(
+    task_name: AgentPath,
+    sender: AgentPath,
+    reason: TurnAbortReason,
+) -> Option<String> {
+    let payload = match reason {
+        TurnAbortReason::Interrupted => {
+            "Agent turn interrupted. The agent can receive a follow-up task.".to_string()
+        }
+        TurnAbortReason::BudgetLimited => {
+            "Agent turn budget limited. The agent can receive a follow-up task.".to_string()
+        }
+        _ => return None,
     };
     Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
 }

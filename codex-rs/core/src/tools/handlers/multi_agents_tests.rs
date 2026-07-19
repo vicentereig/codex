@@ -2109,7 +2109,7 @@ async fn multi_agent_v2_followup_task_rejects_legacy_items_field() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
+async fn multi_agent_v2_forwards_interrupted_and_budget_limited_terminal_events() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -2162,27 +2162,64 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
         )
         .await;
 
-    let notifications = manager
-        .captured_ops()
-        .into_iter()
-        .filter_map(|(id, op)| {
-            (id == root.thread_id)
-                .then_some(op)
-                .and_then(|op| match op {
-                    Op::InterAgentCommunication { communication }
-                        if communication.author.as_str() == "/root/worker"
-                            && communication.recipient == AgentPath::root()
-                            && communication.other_recipients.is_empty()
-                            && !communication.trigger_turn =>
-                    {
-                        Some(communication.content)
-                    }
-                    _ => None,
-                })
-        })
-        .collect::<Vec<_>>();
+    let budget_limited_turn = thread.session.new_default_turn().await;
+    thread
+        .session
+        .send_event(
+            budget_limited_turn.as_ref(),
+            EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some(budget_limited_turn.sub_id.clone()),
+                started_at: None,
+                reason: TurnAbortReason::BudgetLimited,
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
 
-    assert_eq!(notifications, Vec::<String>::new());
+    let interrupted = crate::session_prefix::format_inter_agent_aborted_message(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("worker path"),
+        TurnAbortReason::Interrupted,
+    )
+    .expect("interrupted turn should render");
+    let budget_limited = crate::session_prefix::format_inter_agent_aborted_message(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("worker path"),
+        TurnAbortReason::BudgetLimited,
+    )
+    .expect("budget-limited turn should render");
+    let notifications = timeout(Duration::from_secs(5), async {
+        loop {
+            let notifications = manager
+                .captured_ops()
+                .into_iter()
+                .filter_map(|(id, op)| {
+                    (id == root.thread_id)
+                        .then_some(op)
+                        .and_then(|op| match op {
+                            Op::InterAgentCommunication { communication }
+                                if communication.author.as_str() == "/root/worker"
+                                    && communication.recipient == AgentPath::root()
+                                    && communication.other_recipients.is_empty()
+                                    && !communication.trigger_turn =>
+                            {
+                                Some(communication.content)
+                            }
+                            _ => None,
+                        })
+                })
+                .collect::<Vec<_>>();
+            if notifications == vec![interrupted.clone(), budget_limited.clone()] {
+                break notifications;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parent should receive the emitted terminal outcomes");
+
+    assert_eq!(notifications, vec![interrupted, budget_limited]);
 }
 
 #[tokio::test]

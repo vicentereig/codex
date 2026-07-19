@@ -39,6 +39,7 @@ use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
+use crate::session_prefix::format_inter_agent_aborted_message;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
@@ -1810,15 +1811,41 @@ impl Session {
                 status
             }
         };
-        if !is_final(&status) {
+        if is_final(&status) {
+            self.forward_child_completion_to_parent(
+                turn_context,
+                *parent_thread_id,
+                child_agent_path,
+                status,
+            )
+            .await;
             return;
         }
 
-        self.forward_child_completion_to_parent(
+        let EventMsg::TurnAborted(event) = msg else {
+            return;
+        };
+        let Some(parent_agent_path) = child_agent_path
+            .as_str()
+            .rsplit_once('/')
+            .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
+        else {
+            return;
+        };
+        let Some(message) = format_inter_agent_aborted_message(
+            parent_agent_path.clone(),
+            child_agent_path.clone(),
+            event.reason.clone(),
+        ) else {
+            return;
+        };
+        self.forward_child_terminal_message_to_parent(
             turn_context,
             *parent_thread_id,
             child_agent_path,
+            parent_agent_path,
             status,
+            message,
         )
         .await;
     }
@@ -1846,6 +1873,26 @@ impl Session {
         ) else {
             return;
         };
+        self.forward_child_terminal_message_to_parent(
+            turn_context,
+            parent_thread_id,
+            child_agent_path,
+            parent_agent_path,
+            status,
+            message,
+        )
+        .await;
+    }
+
+    async fn forward_child_terminal_message_to_parent(
+        &self,
+        turn_context: &TurnContext,
+        parent_thread_id: ThreadId,
+        child_agent_path: &codex_protocol::AgentPath,
+        parent_agent_path: codex_protocol::AgentPath,
+        status: AgentStatus,
+        message: String,
+    ) {
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
         let trace_message = self

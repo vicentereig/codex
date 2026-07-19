@@ -1,9 +1,11 @@
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_utils_output_truncation::approx_token_count;
 
 use super::COMPLETION_MESSAGE_MAX_TOKENS;
 use super::ERROR_NEXT_ACTION;
+use super::format_inter_agent_aborted_message;
 use super::format_inter_agent_completion_message;
 
 fn long_agent_path() -> AgentPath {
@@ -50,4 +52,24 @@ fn error_completion_message_stays_below_manual_review_threshold() {
 
     assert!(approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS);
     assert!(message.contains(ERROR_NEXT_ACTION));
+}
+
+#[test]
+fn interrupted_and_budget_limited_turns_have_distinct_completion_messages() {
+    let task_name = AgentPath::root();
+    let sender = AgentPath::try_from("/root/worker").expect("valid agent path");
+
+    let interrupted = format_inter_agent_aborted_message(
+        task_name.clone(),
+        sender.clone(),
+        TurnAbortReason::Interrupted,
+    )
+    .expect("interrupted turn should render");
+    let budget_limited =
+        format_inter_agent_aborted_message(task_name, sender, TurnAbortReason::BudgetLimited)
+            .expect("budget-limited turn should render");
+
+    assert!(interrupted.contains("Agent turn interrupted."));
+    assert!(budget_limited.contains("Agent turn budget limited."));
+    assert_ne!(interrupted, budget_limited);
 }
