@@ -122,6 +122,7 @@ async fn handle_spawn_agent(
                     fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
+                    parent_turn_id: Some(turn.sub_id.clone()),
                     environments: Some(turn.environments.to_selections()),
                     delegation_id: Some(delegation_id),
                     run_id: Some(run_id),
@@ -159,6 +160,9 @@ async fn handle_spawn_agent(
     let new_thread_id = spawned_agent.thread_id;
     let ledger = turn.delegation_ledger.clone();
     let agent_control = session.services.agent_control.clone();
+    let state_db = session.services.state_db.clone();
+    let delegation_id = spawned_agent.metadata.delegation_id.clone();
+    let parent_thread_id = session.thread_id;
     let _ = tokio::spawn(async move {
         let Ok(mut status_rx) = agent_control.subscribe_status(new_thread_id).await else {
             ledger.settle(new_thread_id, DelegationState::Failed).await;
@@ -167,13 +171,102 @@ async fn handle_spawn_agent(
         loop {
             let state = match status_rx.borrow().clone() {
                 AgentStatus::Completed(_) => Some(DelegationState::Completed),
-                AgentStatus::Errored(_) | AgentStatus::Shutdown | AgentStatus::NotFound => {
-                    Some(DelegationState::Failed)
-                }
+                AgentStatus::Errored(_) | AgentStatus::NotFound => Some(DelegationState::Failed),
+                AgentStatus::Shutdown => Some(DelegationState::Cancelled),
                 AgentStatus::Interrupted | AgentStatus::PendingInit | AgentStatus::Running => None,
             };
             if let Some(state) = state {
                 ledger.settle(new_thread_id, state).await;
+                if let (Some(state_db), Some(delegation_id)) =
+                    (state_db.as_ref(), delegation_id.as_deref())
+                    && let Ok(records) =
+                        state_db.list_delegations_for_parent(parent_thread_id).await
+                    && let Some(record) = records
+                        .into_iter()
+                        .find(|record| record.delegation_id == delegation_id)
+                {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .min(i64::MAX as u128) as i64;
+                    let _ = match (record.status, state) {
+                        (
+                            codex_state::DurableDelegationStatus::CancelRequested,
+                            DelegationState::Cancelled,
+                        ) => {
+                            state_db
+                                .confirm_delegation_cancel(
+                                    delegation_id,
+                                    record.version,
+                                    record.lease_epoch,
+                                    now_ms,
+                                )
+                                .await
+                        }
+                        (_, DelegationState::Completed) => {
+                            state_db
+                                .transition_delegation(
+                                    delegation_id,
+                                    record.version,
+                                    record.status,
+                                    codex_state::DurableDelegationStatus::Completed,
+                                    now_ms,
+                                )
+                                .await
+                        }
+                        (_, DelegationState::Failed) => {
+                            state_db
+                                .transition_delegation(
+                                    delegation_id,
+                                    record.version,
+                                    record.status,
+                                    codex_state::DurableDelegationStatus::Failed,
+                                    now_ms,
+                                )
+                                .await
+                        }
+                        (_, DelegationState::Cancelled) => {
+                            state_db
+                                .transition_delegation(
+                                    delegation_id,
+                                    record.version,
+                                    record.status,
+                                    codex_state::DurableDelegationStatus::Failed,
+                                    now_ms,
+                                )
+                                .await
+                        }
+                        _ => Ok(false),
+                    };
+                }
+                return;
+            }
+            if matches!(status_rx.borrow().clone(), AgentStatus::Interrupted)
+                && let (Some(state_db), Some(delegation_id)) =
+                    (state_db.as_ref(), delegation_id.as_deref())
+                && let Ok(records) = state_db.list_delegations_for_parent(parent_thread_id).await
+                && let Some(record) = records.into_iter().find(|record| {
+                    record.delegation_id == delegation_id
+                        && record.status == codex_state::DurableDelegationStatus::CancelRequested
+                })
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                let _ = state_db
+                    .confirm_delegation_cancel(
+                        delegation_id,
+                        record.version,
+                        record.lease_epoch,
+                        now_ms,
+                    )
+                    .await;
+                ledger
+                    .settle(new_thread_id, DelegationState::Cancelled)
+                    .await;
                 return;
             }
             if status_rx.changed().await.is_err() {

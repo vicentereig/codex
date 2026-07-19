@@ -70,6 +70,8 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
+    /// Turn identity scopes durable cancellation to the owning parent turn.
+    pub(crate) parent_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     /// Durable delegation identity assigned by the owning turn.
     pub(crate) delegation_id: Option<String>,

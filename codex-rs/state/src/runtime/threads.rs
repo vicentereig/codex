@@ -5,13 +5,89 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 impl StateRuntime {
+    /// A bounded reconciliation pass returns due delivery IDs for an external sender.
+    /// Claiming remains separately fenced by delivery version and lease epoch.
+    pub async fn list_due_delegation_deliveries(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT delivery_id FROM delegation_delivery_outbox WHERE status = 'pending' AND retry_after_ms <= ? ORDER BY updated_at_ms, delivery_id LIMIT ?",
+        )
+        .bind(now_ms)
+        .bind(limit.clamp(1, 1000))
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(row.try_get("delivery_id")?))
+            .collect()
+    }
+
+    /// Reclaim expired delivery leases in a bounded pass. A later sender must claim the returned
+    /// pending row with its new version/lease epoch before attempting delivery.
+    pub async fn reclaim_expired_delegation_delivery_leases(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "UPDATE delegation_delivery_outbox SET status = 'pending', version = version + 1, updated_at_ms = ? WHERE status = 'sent' AND retry_after_ms <= ? AND delivery_id IN (SELECT delivery_id FROM delegation_delivery_outbox WHERE status = 'sent' AND retry_after_ms <= ? ORDER BY retry_after_ms, delivery_id LIMIT ?)",
+        )
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(limit.clamp(1, 1000))
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Acknowledge a terminal record while retaining it for a bounded audit window.
+    pub async fn acknowledge_delegation(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        now_ms: i64,
+        retain_for_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegations SET acknowledged_at_ms = ?, retained_until_ms = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status IN ('completed', 'failed', 'cancelled', 'detached') AND acknowledged_at_ms IS NULL",
+        )
+        .bind(now_ms)
+        .bind(now_ms.saturating_add(retain_for_ms.max(0)))
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Garbage-collect acknowledged terminal records after retention, with a hard batch cap.
+    pub async fn gc_acknowledged_delegations(
+        &self,
+        now_ms: i64,
+        limit: i64,
+    ) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM delegations WHERE acknowledged_at_ms IS NOT NULL AND retained_until_ms <= ? AND status IN ('completed', 'failed', 'cancelled', 'detached') AND delegation_id IN (SELECT delegation_id FROM delegations WHERE acknowledged_at_ms IS NOT NULL AND retained_until_ms <= ? AND status IN ('completed', 'failed', 'cancelled', 'detached') ORDER BY retained_until_ms, delegation_id LIMIT ?)",
+        )
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(limit.clamp(1, 1000))
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Reconstruct all durable obligations for a parent turn in stable update order.
     pub async fn list_delegations_for_parent(
         &self,
         parent_thread_id: ThreadId,
     ) -> anyhow::Result<Vec<crate::DurableDelegationRecord>> {
         let rows = sqlx::query(
-            "SELECT delegation_id, run_id, parent_thread_id, child_thread_id, agent_path, status, version, attempt, lease_epoch, outcome, last_error, terminal_event_id, delivery_receipt FROM delegations WHERE parent_thread_id = ? ORDER BY updated_at_ms, delegation_id",
+            "SELECT delegation_id, run_id, parent_thread_id, parent_turn_id, child_thread_id, agent_path, status, version, attempt, lease_epoch, outcome, last_error, terminal_event_id, delivery_receipt FROM delegations WHERE parent_thread_id = ? ORDER BY updated_at_ms, delegation_id",
         )
         .bind(parent_thread_id.to_string())
         .fetch_all(self.pool.as_ref())
@@ -26,6 +102,7 @@ impl StateRuntime {
                     delegation_id: row.try_get("delegation_id")?,
                     run_id: row.try_get("run_id")?,
                     parent_thread_id: row.try_get("parent_thread_id")?,
+                    parent_turn_id: row.try_get("parent_turn_id")?,
                     child_thread_id: row.try_get("child_thread_id")?,
                     agent_path: row.try_get("agent_path")?,
                     status,
@@ -131,15 +208,17 @@ impl StateRuntime {
         &self,
         delegation_id: &str,
         expected_version: i64,
+        expected_lease_epoch: i64,
         now_ms: i64,
     ) -> anyhow::Result<bool> {
         let result = sqlx::query(
-            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status IN (?, ?)",
+            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND lease_epoch = ? AND status IN (?, ?)",
         )
         .bind(crate::DurableDelegationStatus::CancelRequested.as_ref())
         .bind(now_ms)
         .bind(delegation_id)
         .bind(expected_version)
+        .bind(expected_lease_epoch)
         .bind(crate::DurableDelegationStatus::Bound.as_ref())
         .bind(crate::DurableDelegationStatus::Running.as_ref())
         .execute(self.pool.as_ref())
@@ -205,15 +284,17 @@ impl StateRuntime {
         delegation_id: &str,
         run_id: &str,
         parent_thread_id: ThreadId,
+        parent_turn_id: &str,
         agent_path: &str,
         now_ms: i64,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO delegations (delegation_id, run_id, parent_thread_id, agent_path, status, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            "INSERT INTO delegations (delegation_id, run_id, parent_thread_id, parent_turn_id, agent_path, status, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
         )
         .bind(delegation_id)
         .bind(run_id)
         .bind(parent_thread_id.to_string())
+        .bind(parent_turn_id)
         .bind(agent_path)
         .bind(crate::DurableDelegationStatus::Reserved.as_ref())
         .bind(now_ms)

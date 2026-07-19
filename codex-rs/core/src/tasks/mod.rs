@@ -7,6 +7,7 @@ mod user_shell;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use codex_extension_api::ExtensionData;
 use futures::future::BoxFuture;
@@ -574,6 +575,37 @@ impl Session {
     /// Cancel the direct child obligations owned by `turn_context` and fan out interruption only
     /// after the ledger mutex has been released.
     async fn cancel_turn_delegations(&self, turn_context: &TurnContext) {
+        if let Some(state_db) = self.services.state_db.clone() {
+            match state_db.list_delegations_for_parent(self.thread_id).await {
+                Ok(records) => {
+                    for record in records.into_iter().filter(|record| {
+                        record.parent_turn_id == turn_context.sub_id
+                            && matches!(
+                                record.status,
+                                codex_state::DurableDelegationStatus::Bound
+                                    | codex_state::DurableDelegationStatus::Running
+                            )
+                    }) {
+                        if let Err(err) = state_db
+                            .request_delegation_cancel(
+                                &record.delegation_id,
+                                record.version,
+                                record.lease_epoch,
+                                SystemTime::now()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis()
+                                    .min(i64::MAX as u128) as i64,
+                            )
+                            .await
+                        {
+                            warn!(%err, delegation_id = %record.delegation_id, "failed to persist delegation cancellation request");
+                        }
+                    }
+                }
+                Err(err) => warn!(%err, "failed to load durable delegations for cancellation"),
+            }
+        }
         // A child can bind while a parent is being aborted; `bind` sees the cancelled
         // reservation and its spawn transaction rolls itself back before initial delivery.
         let child_thread_ids = turn_context.delegation_ledger.cancel_pending().await;

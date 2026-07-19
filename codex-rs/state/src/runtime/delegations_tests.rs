@@ -11,7 +11,7 @@ async fn delegation_bind_requires_exact_version_and_reserved_state() {
     let parent = ThreadId::new();
     let child = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-1", "run-1", parent, "/root/worker", 1)
+        .reserve_delegation("delegation-1", "run-1", parent, "turn-1", "/root/worker", 1)
         .await
         .expect("reservation");
 
@@ -42,7 +42,14 @@ async fn terminal_transition_cannot_be_overwritten() {
         .await
         .expect("state runtime");
     runtime
-        .reserve_delegation("delegation-2", "run-2", ThreadId::new(), "/root/worker", 1)
+        .reserve_delegation(
+            "delegation-2",
+            "run-2",
+            ThreadId::new(),
+            "turn-1",
+            "/root/worker",
+            1,
+        )
         .await
         .expect("reservation");
     assert!(
@@ -78,7 +85,14 @@ async fn retry_claim_advances_attempt_and_lease_epoch_with_cas() {
         .await
         .expect("state runtime");
     runtime
-        .reserve_delegation("delegation-3", "run-3", ThreadId::new(), "/root/worker", 1)
+        .reserve_delegation(
+            "delegation-3",
+            "run-3",
+            ThreadId::new(),
+            "turn-1",
+            "/root/worker",
+            1,
+        )
         .await
         .expect("reservation");
     assert!(
@@ -116,7 +130,7 @@ async fn delivery_intent_and_receipt_are_versioned_and_idempotent() {
     let parent = ThreadId::new();
     let child = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-4", "run-4", parent, "/root/worker", 1)
+        .reserve_delegation("delegation-4", "run-4", parent, "turn-1", "/root/worker", 1)
         .await
         .expect("reservation");
     assert!(
@@ -161,7 +175,14 @@ async fn cancellation_requires_request_then_authoritative_confirmation() {
         .expect("state runtime");
     let child = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-5", "run-5", ThreadId::new(), "/root/worker", 1)
+        .reserve_delegation(
+            "delegation-5",
+            "run-5",
+            ThreadId::new(),
+            "turn-1",
+            "/root/worker",
+            1,
+        )
         .await
         .expect("reservation");
     assert!(
@@ -172,7 +193,7 @@ async fn cancellation_requires_request_then_authoritative_confirmation() {
     );
     assert!(
         runtime
-            .request_delegation_cancel("delegation-5", 1, 3)
+            .request_delegation_cancel("delegation-5", 1, 0, 3)
             .await
             .expect("cancel request")
     );
@@ -190,7 +211,7 @@ async fn cancellation_requires_request_then_authoritative_confirmation() {
     );
     assert!(
         !runtime
-            .request_delegation_cancel("delegation-5", 3, 5)
+            .request_delegation_cancel("delegation-5", 3, 0, 5)
             .await
             .expect("stale cancellation")
     );
@@ -204,7 +225,7 @@ async fn resumed_parent_reconstructs_obligations_and_retains_terminal_records() 
         .expect("state runtime");
     let parent = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-6", "run-6", parent, "/root/failed", 1)
+        .reserve_delegation("delegation-6", "run-6", parent, "turn-1", "/root/failed", 1)
         .await
         .expect("reservation");
     assert_eq!(
@@ -241,6 +262,16 @@ async fn resumed_parent_reconstructs_obligations_and_retains_terminal_records() 
             .len(),
         1
     );
+    assert_eq!(
+        runtime
+            .list_delegations_for_parent(parent)
+            .await
+            .expect("record")
+            .first()
+            .expect("delegation")
+            .parent_turn_id,
+        "turn-1"
+    );
 }
 
 #[tokio::test]
@@ -251,7 +282,14 @@ async fn detached_delegation_does_not_block_resumed_parent() {
         .expect("state runtime");
     let parent = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-7", "run-7", parent, "/root/detached", 1)
+        .reserve_delegation(
+            "delegation-7",
+            "run-7",
+            parent,
+            "turn-1",
+            "/root/detached",
+            1,
+        )
         .await
         .expect("reservation");
     assert!(
@@ -283,7 +321,14 @@ async fn missing_child_recovery_never_invents_completion() {
         .expect("state runtime");
     let parent = ThreadId::new();
     runtime
-        .reserve_delegation("delegation-8", "run-8", parent, "/root/missing", 1)
+        .reserve_delegation(
+            "delegation-8",
+            "run-8",
+            parent,
+            "turn-1",
+            "/root/missing",
+            1,
+        )
         .await
         .expect("reservation");
     assert!(
@@ -317,5 +362,51 @@ async fn missing_child_recovery_never_invents_completion() {
             .await
             .expect("unknown status"),
         crate::DelegationFinalization::Blocked
+    );
+}
+
+#[tokio::test]
+async fn terminal_acknowledgement_retains_then_collects_record() {
+    let home = super::test_support::unique_temp_dir();
+    let runtime = StateRuntime::init(home, "test-provider".to_string())
+        .await
+        .expect("state runtime");
+    let parent = ThreadId::new();
+    runtime
+        .reserve_delegation("delegation-9", "run-9", parent, "turn-9", "/root/worker", 1)
+        .await
+        .expect("reservation");
+    assert!(
+        runtime
+            .transition_delegation(
+                "delegation-9",
+                0,
+                crate::DurableDelegationStatus::Reserved,
+                crate::DurableDelegationStatus::Completed,
+                2,
+            )
+            .await
+            .expect("completion")
+    );
+    assert!(
+        runtime
+            .acknowledge_delegation("delegation-9", 1, 3, 10)
+            .await
+            .expect("acknowledgement")
+    );
+    assert_eq!(
+        runtime
+            .list_delegations_for_parent(parent)
+            .await
+            .expect("retained record")
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .gc_acknowledged_delegations(12, 10)
+            .await
+            .expect("gc"),
+        1
     );
 }

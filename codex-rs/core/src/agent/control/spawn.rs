@@ -665,10 +665,17 @@ impl AgentControl {
             agent_max_threads
         };
         let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
-        if let (Some(delegation_id), Some(run_id), Some(parent_thread_id), Some(state_db)) = (
+        if let (
+            Some(delegation_id),
+            Some(run_id),
+            Some(parent_thread_id),
+            Some(parent_turn_id),
+            Some(state_db),
+        ) = (
             options.delegation_id.as_deref(),
             options.run_id.as_deref(),
             options.parent_thread_id,
+            options.parent_turn_id.as_deref(),
             state.state_db(),
         ) {
             let agent_path = session_source
@@ -681,6 +688,7 @@ impl AgentControl {
                     delegation_id,
                     run_id,
                     parent_thread_id,
+                    parent_turn_id,
                     &agent_path,
                     durable_now_ms(),
                 )

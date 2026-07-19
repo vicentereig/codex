@@ -23,6 +23,7 @@ pub struct DurableDelegationRecord {
     pub delegation_id: String,
     pub run_id: String,
     pub parent_thread_id: String,
+    pub parent_turn_id: String,
     pub child_thread_id: Option<String>,
     pub agent_path: String,
     pub status: DurableDelegationStatus,
