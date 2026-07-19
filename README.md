@@ -4,7 +4,7 @@ Vicente's Codex is a Luna-aware fork for dependable, inspectable agent swarms. I
 
 ## What this fork covers
 
-Two Beads epics shape the fork:
+This fork covers two areas:
 
 - **Durable delegation** — targetable waits, turn-scoped join/cancel/detach, durable run identities, bounded retries, restart reconciliation, and explicit partial or unknown outcomes.
 - **Agent observability (`codex-90w`)** — research and design for truthful nested-agent navigation, plans, lifecycle status, model and effort visibility, usage, and cost. These notes guide the next TUI work; they do not claim features the current UI does not yet expose.
