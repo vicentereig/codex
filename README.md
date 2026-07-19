@@ -1,6 +1,13 @@
-# Luna-aware Codex
+# Codex-flo: Luna-aware Codex
 
-This fork lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
+Codex-flo is a Luna-aware fork for dependable, inspectable agent swarms. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
+
+## What this fork covers
+
+Two Beads epics shape the fork:
+
+- **Durable delegation (`codex-flo`)** — targetable waits, turn-scoped join/cancel/detach, durable run identities, bounded retries, restart reconciliation, and explicit partial or unknown outcomes.
+- **Agent observability (`codex-90w`)** — research and design for truthful nested-agent navigation, plans, lifecycle status, model and effort visibility, usage, and cost. These notes guide the next TUI work; they do not claim features the current UI does not yet expose.
 
 ## Use this fork
 
