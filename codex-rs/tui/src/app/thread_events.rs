@@ -380,6 +380,7 @@ mod tests {
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             items,
             status,
+            plan: None,
             error: None,
             started_at: None,
             completed_at: None,

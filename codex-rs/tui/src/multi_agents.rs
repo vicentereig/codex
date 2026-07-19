@@ -4,6 +4,7 @@
 //! entries, and the fast-switch keyboard shortcuts. Higher-level coordination, such as deciding
 //! which thread becomes active or when a thread closes, stays in [`crate::app::App`].
 
+use crate::agent_runtime::AgentLifecycle;
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
 use crate::text_formatting::truncate_text;
@@ -72,13 +73,35 @@ pub(crate) struct SpawnRequestSummary {
     pub(crate) reasoning_effort: ReasoningEffortConfig,
 }
 
-pub(crate) fn agent_picker_status_dot_spans(is_closed: bool) -> Vec<Span<'static>> {
-    let dot = if is_closed {
-        "•".into()
-    } else {
-        "•".green()
+pub(crate) fn agent_picker_status_spans(
+    lifecycle: Option<AgentLifecycle>,
+    entry: &AgentPickerThreadEntry,
+) -> Vec<Span<'static>> {
+    let (label, style) = match lifecycle {
+        Some(AgentLifecycle::Starting) => ("starting", ratatui::style::Style::new().cyan()),
+        Some(AgentLifecycle::Working) => ("working", ratatui::style::Style::new().green()),
+        Some(AgentLifecycle::NeedsApproval) => {
+            ("approval", ratatui::style::Style::new().cyan().bold())
+        }
+        Some(AgentLifecycle::NeedsInput) => ("input", ratatui::style::Style::new().cyan().bold()),
+        Some(AgentLifecycle::Finished) => ("done", ratatui::style::Style::new().green()),
+        Some(AgentLifecycle::Interrupted) => ("interrupted", ratatui::style::Style::new().dim()),
+        Some(AgentLifecycle::Failed) if entry.is_closed => {
+            ("failed · closed", ratatui::style::Style::new().red().bold())
+        }
+        Some(AgentLifecycle::Failed) => ("failed", ratatui::style::Style::new().red().bold()),
+        Some(AgentLifecycle::Idle) => ("idle", ratatui::style::Style::new().dim()),
+        Some(AgentLifecycle::Closed) | None if entry.is_closed => {
+            ("closed", ratatui::style::Style::new().dim())
+        }
+        Some(AgentLifecycle::StatusUnavailable) => {
+            ("status unknown", ratatui::style::Style::new().dim())
+        }
+        None if entry.is_running => ("working", ratatui::style::Style::new().green()),
+        None => ("status unknown", ratatui::style::Style::new().dim()),
+        Some(AgentLifecycle::Closed) => ("closed", ratatui::style::Style::new().dim()),
     };
-    vec![dot, " ".into()]
+    vec!["[".dim(), Span::styled(label, style), "] ".dim()]
 }
 
 pub(crate) fn format_agent_picker_item_name(
@@ -678,6 +701,34 @@ mod tests {
     use ratatui::style::Color;
     use ratatui::style::Modifier;
     use std::collections::HashMap;
+
+    #[test]
+    fn agent_picker_status_labels_are_textual_and_preserve_failed_close() {
+        let open_entry = AgentPickerThreadEntry {
+            agent_nickname: None,
+            agent_role: None,
+            agent_path: None,
+            is_running: false,
+            is_closed: false,
+        };
+        let closed_entry = AgentPickerThreadEntry {
+            is_closed: true,
+            ..open_entry.clone()
+        };
+        let labels = [
+            agent_picker_status_spans(Some(AgentLifecycle::Working), &open_entry),
+            agent_picker_status_spans(Some(AgentLifecycle::NeedsApproval), &open_entry),
+            agent_picker_status_spans(Some(AgentLifecycle::Failed), &closed_entry),
+            agent_picker_status_spans(None, &open_entry),
+        ]
+        .map(|spans| Line::from(spans).to_string().trim_end().to_string())
+        .join("\n");
+
+        assert_snapshot!("agent_picker_status_labels", labels);
+        let failed = agent_picker_status_spans(Some(AgentLifecycle::Failed), &closed_entry);
+        assert_eq!(failed[1].style.fg, Some(Color::Red));
+        assert!(failed[1].style.add_modifier.contains(Modifier::BOLD));
+    }
 
     #[test]
     fn interacted_sub_agent_activity_does_not_change_liveness() {

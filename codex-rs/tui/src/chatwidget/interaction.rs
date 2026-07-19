@@ -1,6 +1,7 @@
 //! Key routing and composer-adjacent UI interaction for `ChatWidget`.
 
 use super::*;
+use crate::bottom_pane::ListSelectionViewRefresh;
 
 impl ChatWidget {
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
@@ -231,6 +232,15 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(params);
         self.refresh_plan_mode_nudge();
         self.request_redraw();
+    }
+
+    pub(crate) fn refresh_selection_view_if_active(
+        &mut self,
+        view_id: &'static str,
+        refresh: ListSelectionViewRefresh,
+    ) -> bool {
+        self.bottom_pane
+            .refresh_selection_view_if_active(view_id, refresh)
     }
 
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {

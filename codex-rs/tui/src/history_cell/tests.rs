@@ -2191,6 +2191,7 @@ fn plan_update_with_note_and_wrapping_snapshot() {
                     status: StepStatus::Pending,
                 },
             ],
+            ..Default::default()
         };
 
     let cell = new_plan_update(update);
@@ -2214,6 +2215,7 @@ fn plan_update_without_note_snapshot() {
                 status: StepStatus::Pending,
             },
         ],
+        ..Default::default()
     };
 
     let cell = new_plan_update(update);
@@ -2234,6 +2236,7 @@ fn plan_update_does_not_split_url_like_tokens_in_note_or_step() {
             step: format!("Validate callbacks under {step_url} before rollout."),
             status: StepStatus::InProgress,
         }],
+        ..Default::default()
     };
 
     let cell = new_plan_update(update);
@@ -2255,6 +2258,83 @@ fn plan_update_does_not_split_url_like_tokens_in_note_or_step() {
         1,
         "expected full step URL-like token in one rendered line, got: {rendered:?}"
     );
+}
+
+#[test]
+fn reported_checklist_snapshot_wraps_exact_turn_steps() {
+    let steps = [
+        ReportedChecklistStep {
+            step: "Inspect existing error paths and logging around HTTP timeouts",
+            status: ReportedChecklistStatus::Completed,
+        },
+        ReportedChecklistStep {
+            step: "Harden the client with retry backoff and user-friendly messages",
+            status: ReportedChecklistStatus::InProgress,
+        },
+        ReportedChecklistStep {
+            step: "Add transient failure tests and surface results to the UI",
+            status: ReportedChecklistStatus::Pending,
+        },
+    ];
+
+    let lines = render_reported_checklist(
+        /*width*/ 36,
+        Some("The agent reported this checklist for the current turn."),
+        &steps,
+    );
+
+    insta::assert_snapshot!(render_lines(&lines).join("\n"));
+}
+
+#[test]
+fn reported_checklist_preserves_styles_and_continuation_indent() {
+    let steps = [
+        ReportedChecklistStep {
+            step: "completed step with enough text to wrap",
+            status: ReportedChecklistStatus::Completed,
+        },
+        ReportedChecklistStep {
+            step: "active step",
+            status: ReportedChecklistStatus::InProgress,
+        },
+        ReportedChecklistStep {
+            step: "pending step",
+            status: ReportedChecklistStatus::Pending,
+        },
+    ];
+
+    let lines = render_reported_checklist(/*width*/ 24, None, &steps);
+    let rendered = render_lines(&lines);
+    assert!(rendered[0].starts_with("  └ "));
+    assert!(rendered[1].starts_with("    "));
+
+    let completed_style = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.contains("completed"))
+        .expect("completed step span");
+    assert!(
+        completed_style
+            .style
+            .add_modifier
+            .contains(Modifier::CROSSED_OUT)
+    );
+    assert!(completed_style.style.add_modifier.contains(Modifier::DIM));
+
+    let active_style = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("active step"))
+        .expect("active step span");
+    assert_eq!(active_style.style.fg, Some(Color::Cyan));
+    assert!(active_style.style.add_modifier.contains(Modifier::BOLD));
+
+    let pending_style = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("pending step"))
+        .expect("pending step span");
+    assert!(pending_style.style.add_modifier.contains(Modifier::DIM));
 }
 
 #[test]

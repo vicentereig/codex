@@ -101,7 +101,8 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
-        | EventMsg::ThreadSettingsApplied(_) => true,
+        | EventMsg::ThreadSettingsApplied(_)
+        | EventMsg::PlanUpdate(_) => true,
 
         // Only persist these legacy events when the thread's history mode is Legacy.
         // New, paginated rollouts persist ItemCompleted events with TurnItems.
@@ -163,7 +164,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::WebSearchBegin(_)
-        | EventMsg::PlanUpdate(_)
         | EventMsg::ShutdownComplete
         | EventMsg::DeprecationNotice(_)
         | EventMsg::ItemStarted(_)

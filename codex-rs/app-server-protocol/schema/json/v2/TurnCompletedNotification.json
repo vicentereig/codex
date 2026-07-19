@@ -1480,6 +1480,18 @@
           "default": "full",
           "description": "Describes how much of `items` has been loaded for this turn."
         },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TurnPlanSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Latest durable checklist reported for this exact turn, if one was observed."
+        },
         "startedAt": {
           "description": "Unix timestamp (in seconds) when the turn started.",
           "format": "int64",
@@ -1551,6 +1563,64 @@
           "type": "string"
         }
       ]
+    },
+    "TurnPlanSnapshot": {
+      "properties": {
+        "explanation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan": {
+          "items": {
+            "$ref": "#/definitions/TurnPlanStep"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Opaque identity for this checklist update, or `null` for legacy data.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "description": "Unix timestamp (seconds) when this update was accepted, or `null` when unavailable.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "plan"
+      ],
+      "type": "object"
+    },
+    "TurnPlanStep": {
+      "properties": {
+        "status": {
+          "$ref": "#/definitions/TurnPlanStepStatus"
+        },
+        "step": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "step"
+      ],
+      "type": "object"
+    },
+    "TurnPlanStepStatus": {
+      "enum": [
+        "pending",
+        "inProgress",
+        "completed"
+      ],
+      "type": "string"
     },
     "TurnStatus": {
       "enum": [

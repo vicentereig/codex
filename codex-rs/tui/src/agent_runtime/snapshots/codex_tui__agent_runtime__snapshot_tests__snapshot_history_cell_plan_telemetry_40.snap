@@ -1,0 +1,22 @@
+---
+source: tui/src/agent_runtime/snapshot_tests.rs
+expression: "render_lines(&cell.display_lines(width)).join(\"\\n\")"
+---
+• Agent snapshot · last observed event
+  #5
+  Point-in-time reported state ·
+  exact-turn checklists are agent-
+  reported, not verified
+  └─ /root/research · working ·
+    checklist 1/2
+     requested requested-model/
+     medium · effective effective-
+     model/high
+     tokens 1234 cumulative
+     est. USD 0.012345 (complete,
+     fixture-pricing v1)
+     reported checklist · turn
+     turn-1
+       └ Reported work for this turn
+         ✔ Inspect event flow
+         □ Preserve reconnect truth

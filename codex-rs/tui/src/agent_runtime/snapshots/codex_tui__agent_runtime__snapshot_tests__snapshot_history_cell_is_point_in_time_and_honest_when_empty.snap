@@ -1,0 +1,8 @@
+---
+source: tui/src/agent_runtime/snapshot_tests.rs
+expression: "render_lines(&cell.display_lines(80)).join(\"\\n\")"
+---
+• Agent snapshot · last observed event #4
+  Point-in-time reported state · exact-turn checklists are agent-reported, not
+  verified
+  └─ no agents observed in this session

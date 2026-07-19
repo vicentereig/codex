@@ -1,0 +1,11 @@
+---
+source: tui/src/agent_runtime/gallery_tests.rs
+expression: rendered
+---
+Agent gallery · compact · reported state
+› root         working
+  ├─ tui       finished
+  ├─ review    failed · closed
+  └─ orphan    status unavailable
+  └─ nested    needs input
+  ↑↓ select · Enter watch · Esc close

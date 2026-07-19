@@ -7,6 +7,7 @@
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::chatwidget::ThreadInputStateRestoreMode;
+use crate::multi_agents::format_agent_picker_item_name;
 use crate::session_resume::read_session_model;
 
 impl App {

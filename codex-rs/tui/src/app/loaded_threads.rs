@@ -10,9 +10,9 @@
 //! set of descendants. It intentionally has no async, no I/O, and no side effects so it can be
 //! unit-tested in isolation.
 //!
-//! The walk starts from `primary_thread_id` and repeatedly follows
-//! `SessionSource::SubAgent(ThreadSpawn { parent_thread_id, .. })` edges until no new children are
-//! found. The primary thread itself is never included in the output.
+//! The walk starts from `primary_thread_id` and repeatedly follows authoritative
+//! `Thread.parent_thread_id` edges, falling back to legacy `SessionSource::SubAgent` metadata when
+//! needed. The primary thread itself is never included in the output.
 
 use crate::app_server_session::thread_blocks_direct_input;
 use codex_app_server_protocol::SessionSource;
@@ -66,8 +66,7 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
                 continue;
             }
 
-            let Some(source_parent_thread_id) = thread_spawn_parent_thread_id(&thread.source)
-            else {
+            let Some(source_parent_thread_id) = thread_parent_thread_id(thread) else {
                 continue;
             };
 
@@ -116,6 +115,14 @@ fn thread_spawn_parent_thread_id(source: &SessionSource) -> Option<ThreadId> {
     }
 }
 
+fn thread_parent_thread_id(thread: &Thread) -> Option<ThreadId> {
+    thread
+        .parent_thread_id
+        .as_deref()
+        .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+        .or_else(|| thread_spawn_parent_thread_id(&thread.source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::LoadedSubagentThread;
@@ -139,6 +146,8 @@ mod tests {
             ephemeral: false,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 0,
             updated_at: 0,
             recency_at: Some(0),

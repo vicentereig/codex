@@ -7,6 +7,8 @@
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
+use crate::bottom_pane::ListSelectionViewRefresh;
+use crate::bottom_pane::SideContentWidth;
 use codex_config::types::ResumeCwdMode;
 
 #[derive(Clone, Copy)]
@@ -16,6 +18,77 @@ pub(super) enum ThreadAttachPresentation {
 }
 
 impl App {
+    pub(super) fn refresh_agent_workspace(&mut self) {
+        let Some(workspace) = self.agent_workspace.clone() else {
+            return;
+        };
+        let snapshot = self.agent_runtime.snapshot();
+        let runtime_ids = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .map(|agent| agent.thread_id)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut rows = self
+            .agent_navigation
+            .ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, entry)| {
+                Some(*thread_id) != self.primary_thread_id
+                    && (entry.is_closed
+                        || runtime_ids.contains(thread_id)
+                        || entry
+                            .agent_path
+                            .as_deref()
+                            .is_some_and(|path| !path.trim().is_empty()))
+            })
+            .map(|(thread_id, entry)| (thread_id, entry.clone()))
+            .collect::<Vec<_>>();
+        if let Some(snapshot) = snapshot.as_ref() {
+            for summary in &snapshot.agents {
+                if rows
+                    .iter()
+                    .any(|(thread_id, _)| *thread_id == summary.thread_id)
+                {
+                    continue;
+                }
+                rows.push((
+                    summary.thread_id,
+                    crate::multi_agents::AgentPickerThreadEntry {
+                        agent_nickname: summary.agent_nickname.clone(),
+                        agent_role: summary.agent_role.clone(),
+                        agent_path: summary.agent_path.clone(),
+                        is_running: matches!(
+                            summary.lifecycle,
+                            crate::agent_runtime::AgentLifecycle::Starting
+                                | crate::agent_runtime::AgentLifecycle::Working
+                                | crate::agent_runtime::AgentLifecycle::NeedsApproval
+                                | crate::agent_runtime::AgentLifecycle::NeedsInput
+                        ),
+                        is_closed: summary.is_closed,
+                    },
+                ));
+            }
+        }
+        workspace.reconcile_rows(rows, snapshot.as_ref());
+        let items = workspace.items(self.active_thread_id, |id| {
+            Box::new(move |tx| {
+                tx.send(AppEvent::SelectAgentThread(id));
+            })
+        });
+        self.chat_widget.refresh_selection_view_if_active(
+            "agent-workspace",
+            ListSelectionViewRefresh {
+                items,
+                tabs: Vec::new(),
+            },
+        );
+    }
+
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
         self.backfill_loaded_subagent_threads(app_server).await;
         // V2 subagents are identified by canonical paths observed from activity events or loaded
@@ -51,37 +124,10 @@ impl App {
                     .await;
             }
         }
-        let path_backed_threads = self
-            .agent_navigation
-            .ordered_path_backed_subagent_threads(self.primary_thread_id);
-        if !path_backed_threads.is_empty() {
-            let running_threads: Vec<_> = path_backed_threads
-                .into_iter()
-                .filter_map(|(thread_id, entry)| {
-                    if !entry.is_running || entry.is_closed {
-                        return None;
-                    }
-                    Some((thread_id, entry.agent_path.as_deref()?.trim().to_string()))
-                })
-                .collect();
-            let mut entries = Vec::new();
-            for (thread_id, agent_path) in running_threads {
-                let preview = if let Some(channel) = self.thread_event_channels.get(&thread_id) {
-                    let store = channel.store.lock().await;
-                    super::agent_status_feed::AgentStatusThreadPreview::from_store(
-                        agent_path, &store,
-                    )
-                } else {
-                    super::agent_status_feed::AgentStatusThreadPreview::empty(agent_path)
-                };
-                entries.push(preview);
-            }
-
-            self.chat_widget
-                .add_to_history(super::agent_status_feed::AgentStatusHistoryCell::new(
-                    entries,
-                ));
-        }
+        let runtime_snapshot = self.agent_runtime.snapshot();
+        self.chat_widget.add_to_history(
+            crate::agent_runtime::AgentSnapshotHistoryCell::new_optional(runtime_snapshot),
+        );
 
         let mut thread_ids = self.agent_navigation.tracked_thread_ids();
         for thread_id in self.thread_event_channels.keys().copied() {
@@ -117,53 +163,60 @@ impl App {
             return;
         }
 
-        let mut initial_selected_idx = None;
-        let items: Vec<SelectionItem> = self
+        let runtime_snapshot = self.agent_runtime.snapshot();
+        let runtime_ids = runtime_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .map(|agent| agent.thread_id)
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let rows = self
             .agent_navigation
             .ordered_threads()
             .into_iter()
-            .enumerate()
-            .map(|(idx, (thread_id, entry))| {
-                if self.active_thread_id == Some(thread_id) {
-                    initial_selected_idx = Some(idx);
-                }
-                let id = thread_id;
-                let is_primary = self.primary_thread_id == Some(thread_id);
-                let name = entry
-                    .agent_path
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|agent_path| !is_primary && !agent_path.is_empty())
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| {
-                        format_agent_picker_item_name(
-                            entry.agent_nickname.as_deref(),
-                            entry.agent_role.as_deref(),
-                            is_primary,
-                        )
-                    });
-                let uuid = thread_id.to_string();
-                SelectionItem {
-                    name: name.clone(),
-                    name_prefix_spans: agent_picker_status_dot_spans(entry.is_closed),
-                    description: Some(uuid.clone()),
-                    is_current: self.active_thread_id == Some(thread_id),
-                    actions: vec![Box::new(move |tx| {
-                        tx.send(AppEvent::SelectAgentThread(id));
-                    })],
-                    dismiss_on_select: true,
-                    search_value: Some(format!("{name} {uuid}")),
-                    ..Default::default()
-                }
+            .filter(|(thread_id, entry)| {
+                Some(*thread_id) != self.primary_thread_id
+                    && (entry.is_closed
+                        || runtime_ids.contains(thread_id)
+                        || entry
+                            .agent_path
+                            .as_deref()
+                            .is_some_and(|path| !path.trim().is_empty()))
             })
-            .collect();
+            .map(|(thread_id, entry)| (thread_id, entry.clone()))
+            .collect::<Vec<_>>();
+        let initial_selected_idx = self
+            .active_thread_id
+            .and_then(|thread_id| rows.iter().position(|(id, _)| *id == thread_id));
+        let workspace = crate::agent_runtime::AgentWorkspace::new(
+            rows,
+            runtime_snapshot.as_ref(),
+            initial_selected_idx.unwrap_or_default(),
+        );
+        self.agent_workspace = Some(workspace.clone());
+        let items = workspace.items(self.active_thread_id, |id| {
+            Box::new(move |tx| {
+                tx.send(AppEvent::SelectAgentThread(id));
+            })
+        });
 
         self.chat_widget.show_selection_view(SelectionViewParams {
+            view_id: Some("agent-workspace"),
             title: Some("Subagents".to_string()),
             subtitle: Some(AgentNavigationState::picker_subtitle()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
+            side_content: Box::new(workspace.wide_detail()),
+            side_content_width: SideContentWidth::Half,
+            side_content_min_width: 32,
+            stacked_side_content: Some(Box::new(workspace.stacked_detail())),
+            preserve_side_content_bg: false,
+            on_selection_changed: workspace.selection_callback(),
             ..Default::default()
         });
     }
@@ -185,6 +238,8 @@ impl App {
             let message = cause.to_string();
             message.contains("includeTurns is unavailable before first user message")
                 || message.contains("ephemeral threads do not support includeTurns")
+                || message
+                    .contains("paginated threads do not support thread/read(includeTurns=true)")
         })
     }
 
@@ -530,6 +585,8 @@ impl App {
     pub(super) fn reset_thread_event_state(&mut self) {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
+        self.agent_runtime = crate::agent_runtime::AgentRuntimeController::default();
+        self.agent_workspace = None;
         self.agent_navigation.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
@@ -747,7 +804,46 @@ impl App {
             }
         }
 
-        for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
+        let loaded_subagents =
+            find_loaded_subagent_threads_for_primary(threads.clone(), primary_thread_id);
+        let threads_by_id = threads
+            .into_iter()
+            .filter_map(|thread| {
+                ThreadId::from_string(&thread.id)
+                    .ok()
+                    .map(|thread_id| (thread_id, thread))
+            })
+            .collect::<HashMap<_, _>>();
+        let metadata_threads = loaded_subagents
+            .iter()
+            .filter_map(|loaded| threads_by_id.get(&loaded.thread_id).cloned())
+            .collect::<Vec<_>>();
+        self.agent_runtime
+            .hydrate_loaded_thread_metadata(primary_thread_id, &metadata_threads);
+
+        let mut history_threads = Vec::new();
+        for thread in loaded_subagents {
+            match app_server
+                .thread_read(thread.thread_id, /*include_turns*/ true)
+                .await
+            {
+                Ok(thread) => history_threads.push(thread),
+                Err(err) if Self::can_fallback_from_include_turns_error(&err) => {
+                    tracing::debug!(
+                        thread_id = %thread.thread_id,
+                        %err,
+                        "turn history unavailable during subagent runtime backfill"
+                    );
+                }
+                Err(err) => {
+                    had_read_error = true;
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        %err,
+                        "failed to read loaded thread turns"
+                    );
+                }
+            }
             let agent_path = thread.agent_path;
             if thread.blocks_direct_input {
                 self.agent_navigation.mark_parent_owned(thread.thread_id);
@@ -761,6 +857,8 @@ impl App {
             self.agent_navigation
                 .set_agent_path(thread.thread_id, agent_path);
         }
+        self.agent_runtime
+            .hydrate_loaded_threads(primary_thread_id, &history_threads);
         self.sync_active_agent_label();
 
         !had_read_error
@@ -1025,8 +1123,12 @@ mod tests {
         let ephemeral = color_eyre::eyre::eyre!(
             "thread/read failed during TUI session lookup: thread/read failed: ephemeral threads do not support includeTurns"
         );
+        let paginated = color_eyre::eyre::eyre!(
+            "thread/read failed during TUI session lookup: thread/read failed: paginated threads do not support thread/read(includeTurns=true)"
+        );
 
         assert!(App::can_fallback_from_include_turns_error(&unmaterialized));
         assert!(App::can_fallback_from_include_turns_error(&ephemeral));
+        assert!(App::can_fallback_from_include_turns_error(&paginated));
     }
 }

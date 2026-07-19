@@ -869,6 +869,7 @@ async fn plan_implementation_popup_skips_replayed_turn_complete() {
                 memory_citation: None,
             }],
             status: AppServerTurnStatus::Completed,
+            plan: None,
             error: None,
             started_at: None,
             completed_at: None,
@@ -907,6 +908,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
                 memory_citation: None,
             }],
             status: AppServerTurnStatus::Completed,
+            plan: None,
             error: None,
             started_at: None,
             completed_at: None,
@@ -993,6 +995,7 @@ async fn plan_implementation_popup_skips_without_proposed_plan() {
             step: "First".to_string(),
             status: StepStatus::Pending,
         }],
+        ..Default::default()
     });
     chat.on_task_complete(
         /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
@@ -1133,6 +1136,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
             step: "First".to_string(),
             status: StepStatus::Pending,
         }],
+        ..Default::default()
     });
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 92.0)));
     chat.on_task_complete(
@@ -1209,6 +1213,7 @@ async fn submit_user_message_queues_while_compaction_turn_is_running() {
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::InProgress,
+                plan: None,
                 error: None,
                 started_at: Some(0),
                 completed_at: None,
@@ -1254,6 +1259,7 @@ async fn submit_user_message_queues_while_compaction_turn_is_running() {
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: AppServerTurnStatus::Completed,
+                plan: None,
                 error: None,
                 started_at: None,
                 completed_at: Some(0),
@@ -1725,6 +1731,7 @@ async fn plan_update_renders_history_cell() {
                 status: StepStatus::Pending,
             },
         ],
+        ..Default::default()
     };
     chat.on_plan_update(update);
     let cells = drain_insert_history(&mut rx);

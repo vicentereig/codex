@@ -187,6 +187,8 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             ephemeral: false,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 1,
             recency_at: Some(1),

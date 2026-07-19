@@ -307,6 +307,7 @@ mod thread_processor_behavior_tests {
                 }],
             }],
             items_view: TurnItemsView::Full,
+            plan: None,
             error: None,
             status: TurnStatus::InProgress,
             started_at: None,

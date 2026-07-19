@@ -672,6 +672,7 @@ mod tests {
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: Vec::new(),
                 status: TurnStatus::Completed,
+                plan: None,
                 error: None,
                 started_at: None,
                 completed_at: Some(0),

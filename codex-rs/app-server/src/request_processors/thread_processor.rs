@@ -4609,6 +4609,7 @@ fn stored_turn_to_api_turn(
         items,
         items_view,
         status,
+        plan: None,
         error,
         started_at: turn.started_at,
         completed_at: turn.completed_at,
@@ -4825,6 +4826,8 @@ pub(crate) fn thread_from_stored_thread(
         } else {
             thread.model_provider
         },
+        model: thread.model,
+        reasoning_effort: thread.reasoning_effort,
         created_at: thread.created_at.timestamp(),
         updated_at: thread.updated_at.timestamp(),
         recency_at: Some(thread.recency_at.timestamp()),
@@ -5032,6 +5035,8 @@ fn build_thread_from_snapshot(
         ephemeral: config_snapshot.ephemeral,
         history_mode: config_snapshot.history_mode.into(),
         model_provider: config_snapshot.model_provider_id.clone(),
+        model: Some(config_snapshot.model.clone()),
+        reasoning_effort: config_snapshot.reasoning_effort.clone(),
         created_at: now,
         updated_at: now,
         recency_at: Some(now),

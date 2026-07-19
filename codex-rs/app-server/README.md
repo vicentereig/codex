@@ -492,9 +492,13 @@ Later, after the idle unload timeout:
 
 ### Example: Read a thread
 
-Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want thread history loaded into `thread.turns`. The returned thread includes `parentThreadId`, `agentNickname`, and `agentRole` for subagent threads when available.
+Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want thread history loaded into `thread.turns`. The returned thread includes `parentThreadId`, `agentNickname`, and `agentRole` for subagent threads when available. `model` and `reasoningEffort` report the latest authoritative effective runtime values recorded by the thread store; either is `null` when that metadata is unavailable.
 
-Paginated threads support metadata-only reads; `includeTurns: true` is unsupported for them.
+For legacy-history threads, each returned turn's nullable `plan` is the latest durable `update_plan` checklist reported for that exact turn. Its `revision` is an opaque update identity, and `updatedAt` is the Unix timestamp in seconds when Codex accepted the update; either metadata field is `null` for data that predates the durable contract. Clients can select the plan on the in-progress turn as the active checklist and the plan on the most recent completed, interrupted, or failed turn as the latest terminal checklist. Checklist completion is reported state, not an aggregate estimate of branch progress.
+
+Paginated threads support metadata-only reads; `includeTurns: true` is unsupported for them. `thread/turns/list` currently returns `plan: null`, explicitly indicating that durable checklist projection is unavailable for paginated history.
+
+Thread read and resume responses do not currently replay response-usage events or historical per-turn cost. After reconnect, clients must treat historical token usage and cost as unavailable unless they receive a separate authoritative cumulative usage projection; they must not reconstruct cost by summing parent-visible child summaries.
 
 ```json
 { "method": "thread/read", "id": 22, "params": { "threadId": "thr_123" } }

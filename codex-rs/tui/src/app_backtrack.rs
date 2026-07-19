@@ -677,6 +677,7 @@ mod tests {
                 .collect(),
             items_view: codex_app_server_protocol::TurnItemsView::Full,
             status,
+            plan: None,
             error: None,
             started_at: None,
             completed_at: None,

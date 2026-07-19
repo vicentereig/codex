@@ -974,6 +974,7 @@ pub(super) fn app_server_turn(
         items_view: codex_app_server_protocol::TurnItemsView::Full,
         items: Vec::new(),
         status,
+        plan: None,
         error,
         started_at: None,
         completed_at: None,

@@ -130,6 +130,12 @@ pub(crate) type OnCancelCallback = Option<Box<dyn Fn(&AppEventSender) + Send + S
 /// be accepted and are skipped by keyboard navigation.
 #[derive(Default)]
 pub(crate) struct SelectionItem {
+    /// Caller-supplied identity used to preserve this row across a refresh.
+    ///
+    /// Refresh callers should provide a non-empty value that remains stable even
+    /// when the row's position or presentation changes. Rows without a logical
+    /// id still render normally but cannot retain selection across a refresh.
+    pub logical_id: Option<String>,
     pub name: String,
     pub name_prefix_spans: Vec<Span<'static>>,
     pub toggle: Option<SelectionToggle>,
@@ -205,6 +211,16 @@ pub(crate) struct SelectionViewParams {
 
     /// Called when the picker is dismissed via Esc/Ctrl+C without selecting.
     pub on_cancel: OnCancelCallback,
+}
+
+/// Caller-supplied replacement contents for a [`ListSelectionView`].
+///
+/// Items and tabs retain the order supplied here. [`ListSelectionView::refresh`]
+/// preserves interaction state where the replacement still contains the active
+/// tab and the selected item's [`SelectionItem::logical_id`].
+pub(crate) struct ListSelectionViewRefresh {
+    pub items: Vec<SelectionItem>,
+    pub tabs: Vec<SelectionTab>,
 }
 
 impl Default for SelectionViewParams {
@@ -416,6 +432,41 @@ impl ListSelectionView {
         s
     }
 
+    /// Replaces the caller-owned list contents without needlessly resetting the
+    /// user's context.
+    ///
+    /// The caller controls replacement ordering. When possible, this retains
+    /// the active tab by tab id and the selected row by [`SelectionItem::logical_id`],
+    /// rather than their previous positional indexes. The current search query
+    /// and scroll position are retained as far as the filtered replacement
+    /// allows.
+    pub(crate) fn refresh(&mut self, refresh: ListSelectionViewRefresh) {
+        let selected_logical_id = self.selected_logical_id().map(ToOwned::to_owned);
+        let active_tab_id = self.active_tab_id().map(ToOwned::to_owned);
+        let preserved_scroll_top = self.state.scroll_top;
+        let on_selection_changed = self.on_selection_changed.take();
+
+        self.items = refresh.items;
+        self.tabs = refresh.tabs;
+        self.active_tab_idx = active_tab_id
+            .as_deref()
+            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
+            .or_else(|| (!self.tabs.is_empty()).then_some(0));
+        self.initial_selected_idx = None;
+        self.state.reset();
+        self.apply_filter();
+
+        if let Some(logical_id) = selected_logical_id.as_deref() {
+            self.select_logical_id(logical_id);
+        }
+        self.restore_scroll_position(preserved_scroll_top);
+
+        self.on_selection_changed = on_selection_changed;
+        if self.selected_logical_id().map(str::to_owned) != selected_logical_id {
+            self.fire_selection_changed();
+        }
+    }
+
     fn visible_len(&self) -> usize {
         self.filtered_indices.len()
     }
@@ -471,6 +522,31 @@ impl ListSelectionView {
         self.state
             .selected_idx
             .and_then(|visible_idx| self.filtered_indices.get(visible_idx).copied())
+    }
+
+    fn selected_logical_id(&self) -> Option<&str> {
+        self.selected_actual_idx()
+            .and_then(|actual_idx| self.active_items().get(actual_idx))
+            .and_then(|item| item.logical_id.as_deref())
+            .filter(|logical_id| !logical_id.is_empty())
+    }
+
+    fn select_logical_id(&mut self, logical_id: &str) {
+        let selected_visible_idx = self.filtered_indices.iter().position(|actual_idx| {
+            self.active_items().get(*actual_idx).is_some_and(|item| {
+                Self::item_is_enabled(item) && item.logical_id.as_deref() == Some(logical_id)
+            })
+        });
+        if let Some(selected_visible_idx) = selected_visible_idx {
+            self.state.selected_idx = Some(selected_visible_idx);
+        }
+    }
+
+    fn restore_scroll_position(&mut self, preserved_scroll_top: usize) {
+        let len = self.visible_len();
+        let visible = Self::max_visible_rows(len);
+        self.state.scroll_top = preserved_scroll_top.min(len.saturating_sub(visible));
+        self.state.ensure_visible(len, visible);
     }
 
     fn apply_filter(&mut self) {
@@ -934,6 +1010,11 @@ impl ListSelectionView {
 }
 
 impl BottomPaneView for ListSelectionView {
+    fn refresh_selection_contents(&mut self, refresh: ListSelectionViewRefresh) -> bool {
+        self.refresh(refresh);
+        true
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         // Searchable lists reserve printable characters for query input. This
         // keeps vim-style plain j/k/h/l useful in non-search lists without
@@ -1846,6 +1927,77 @@ mod tests {
         assert!(
             rendered.contains("Alpha Item") && !rendered.contains("Beta Item"),
             "expected switched tab to render the alpha items, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn refresh_preserves_logical_selection_scroll_filter_and_active_tab() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let tab = |id: &str, item_ids: Vec<&str>| SelectionTab {
+            id: id.to_string(),
+            label: id.to_string(),
+            header: Box::new(()),
+            items: item_ids
+                .into_iter()
+                .map(|logical_id| SelectionItem {
+                    logical_id: Some(logical_id.to_string()),
+                    name: format!("{id} {logical_id}"),
+                    search_value: Some(format!("{id} {logical_id}")),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        let item_ids = (0..12)
+            .map(|index| format!("item-{index}"))
+            .collect::<Vec<_>>();
+        let item_id_refs = item_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut view = ListSelectionView::new(
+            SelectionViewParams {
+                tabs: vec![
+                    tab("alpha", vec!["alpha-item"]),
+                    tab("beta", item_id_refs.clone()),
+                ],
+                initial_tab_id: Some("beta".to_string()),
+                is_searchable: true,
+                ..Default::default()
+            },
+            tx,
+            crate::keymap::RuntimeKeymap::defaults().list,
+        );
+        view.set_search_query("beta".to_string());
+        for _ in 0..9 {
+            view.handle_key_event(KeyEvent::from(KeyCode::Down));
+        }
+        assert_eq!(view.selected_actual_idx(), Some(9));
+        assert_eq!(view.state.scroll_top, 2);
+
+        let mut refreshed_beta_ids = item_id_refs;
+        refreshed_beta_ids.rotate_left(1);
+        view.refresh(ListSelectionViewRefresh {
+            items: Vec::new(),
+            tabs: vec![
+                tab("beta", refreshed_beta_ids),
+                tab("alpha", vec!["alpha-item"]),
+            ],
+        });
+
+        assert_eq!(view.active_tab_id(), Some("beta"));
+        assert_eq!(view.search_query, "beta");
+        assert_eq!(
+            view.selected_actual_idx()
+                .and_then(|index| view.active_items().get(index))
+                .and_then(|item| item.logical_id.as_deref()),
+            Some("item-9")
+        );
+        assert_eq!(view.state.scroll_top, 2);
+        assert_eq!(
+            view.active_items()
+                .first()
+                .and_then(|item| item.logical_id.as_deref()),
+            Some("item-1"),
+            "refresh must retain caller-supplied ordering"
         );
     }
 

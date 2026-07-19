@@ -113,6 +113,7 @@ impl ChatWidget {
                             },
                         })
                         .collect(),
+                    ..Default::default()
                 })
             }
             ServerNotification::HookStarted(notification) => {

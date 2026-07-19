@@ -7,6 +7,7 @@ use crossterm::event::KeyEvent;
 use std::time::Instant;
 
 use super::CancellationEvent;
+use super::list_selection_view::ListSelectionViewRefresh;
 
 /// Reason an active bottom-pane view finished.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +18,10 @@ pub(crate) enum ViewCompletion {
 
 /// Trait implemented by every view that can be shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
+    /// Replace point-in-time list contents while preserving the view's interaction state.
+    fn refresh_selection_contents(&mut self, _refresh: ListSelectionViewRefresh) -> bool {
+        false
+    }
     /// Handle a key event while the view is active. A redraw is always
     /// scheduled after this call.
     fn handle_key_event(&mut self, _key_event: KeyEvent) {}

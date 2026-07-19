@@ -45,7 +45,9 @@ impl HistoryCell for StreamingPlanTailCell {
 }
 /// Render a user‑friendly plan update styled like a checkbox todo list.
 pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
-    let UpdatePlanArgs { explanation, plan } = update;
+    let UpdatePlanArgs {
+        explanation, plan, ..
+    } = update;
     PlanUpdateCell { explanation, plan }
 }
 
@@ -163,55 +165,93 @@ pub(crate) struct PlanUpdateCell {
     plan: Vec<PlanItemArg>,
 }
 
+/// Status reported by an agent for one exact-turn checklist step.
+///
+/// This is presentation state only: a reported checklist does not imply that the UI verified the
+/// work described by the step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReportedChecklistStatus {
+    Completed,
+    InProgress,
+    Pending,
+}
+
+/// One step in an exact-turn checklist reported by an agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReportedChecklistStep<'a> {
+    pub(crate) step: &'a str,
+    pub(crate) status: ReportedChecklistStatus,
+}
+
+/// Render a bounded, width-aware checklist body for an agent's reported turn plan.
+pub(crate) fn render_reported_checklist(
+    width: u16,
+    explanation: Option<&str>,
+    steps: &[ReportedChecklistStep<'_>],
+) -> Vec<Line<'static>> {
+    let render_note = |text: &str| -> Vec<Line<'static>> {
+        let wrap_width = width.saturating_sub(4).max(1) as usize;
+        let note = Line::from(text.to_string().dim().italic());
+        let wrapped = adaptive_wrap_line(&note, RtOptions::new(wrap_width));
+        let mut out = Vec::new();
+        push_owned_lines(&wrapped, &mut out);
+        out
+    };
+
+    let render_step = |status: ReportedChecklistStatus, text: &str| -> Vec<Line<'static>> {
+        let (box_str, step_style) = match status {
+            ReportedChecklistStatus::Completed => ("✔ ", Style::default().crossed_out().dim()),
+            ReportedChecklistStatus::InProgress => ("□ ", Style::default().cyan().bold()),
+            ReportedChecklistStatus::Pending => ("□ ", Style::default().dim()),
+        };
+
+        let opts = RtOptions::new(width.saturating_sub(4).max(1) as usize)
+            .initial_indent(box_str.into())
+            .subsequent_indent("  ".into());
+        let step = Line::from(text.to_string().set_style(step_style));
+        let wrapped = adaptive_wrap_line(&step, opts);
+        let mut out = Vec::new();
+        push_owned_lines(&wrapped, &mut out);
+        out
+    };
+
+    let mut indented_lines = Vec::new();
+    if let Some(expl) = explanation.map(str::trim).filter(|text| !text.is_empty()) {
+        indented_lines.extend(render_note(expl));
+    }
+
+    if steps.is_empty() {
+        indented_lines.push(Line::from("(no steps provided)".dim().italic()));
+    } else {
+        for step in steps {
+            indented_lines.extend(render_step(step.status, step.step));
+        }
+    }
+
+    prefix_lines(indented_lines, "  └ ".dim(), "    ".into())
+}
+
 impl HistoryCell for PlanUpdateCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let render_note = |text: &str| -> Vec<Line<'static>> {
-            let wrap_width = width.saturating_sub(4).max(1) as usize;
-            let note = Line::from(text.to_string().dim().italic());
-            let wrapped = adaptive_wrap_line(&note, RtOptions::new(wrap_width));
-            let mut out = Vec::new();
-            push_owned_lines(&wrapped, &mut out);
-            out
-        };
+        let steps = self
+            .plan
+            .iter()
+            .map(|PlanItemArg { step, status }| ReportedChecklistStep {
+                step,
+                status: match status {
+                    StepStatus::Completed => ReportedChecklistStatus::Completed,
+                    StepStatus::InProgress => ReportedChecklistStatus::InProgress,
+                    StepStatus::Pending => ReportedChecklistStatus::Pending,
+                },
+            })
+            .collect::<Vec<_>>();
 
-        let render_step = |status: &StepStatus, text: &str| -> Vec<Line<'static>> {
-            let (box_str, step_style) = match status {
-                StepStatus::Completed => ("✔ ", Style::default().crossed_out().dim()),
-                StepStatus::InProgress => ("□ ", Style::default().cyan().bold()),
-                StepStatus::Pending => ("□ ", Style::default().dim()),
-            };
-
-            let opts = RtOptions::new(width.saturating_sub(4).max(1) as usize)
-                .initial_indent(box_str.into())
-                .subsequent_indent("  ".into());
-            let step = Line::from(text.to_string().set_style(step_style));
-            let wrapped = adaptive_wrap_line(&step, opts);
-            let mut out = Vec::new();
-            push_owned_lines(&wrapped, &mut out);
-            out
-        };
-
-        let mut lines: Vec<Line<'static>> = vec![];
-        lines.push(vec!["• ".dim(), "Updated Plan".bold()].into());
-
-        let mut indented_lines = vec![];
-        let note = self
-            .explanation
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|t| !t.is_empty());
-        if let Some(expl) = note {
-            indented_lines.extend(render_note(expl));
-        };
-
-        if self.plan.is_empty() {
-            indented_lines.push(Line::from("(no steps provided)".dim().italic()));
-        } else {
-            for PlanItemArg { step, status } in self.plan.iter() {
-                indented_lines.extend(render_step(status, step));
-            }
-        }
-        lines.extend(prefix_lines(indented_lines, "  └ ".dim(), "    ".into()));
+        let mut lines = vec![vec!["• ".dim(), "Updated Plan".bold()].into()];
+        lines.extend(render_reported_checklist(
+            width,
+            self.explanation.as_deref(),
+            &steps,
+        ));
 
         lines
     }

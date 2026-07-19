@@ -900,6 +900,7 @@ mod tests {
                     items: Vec::new(),
                     items_view: TurnItemsView::NotLoaded,
                     status: TurnStatus::Completed,
+                    plan: None,
                     error: None,
                     started_at: None,
                     completed_at: Some(0),

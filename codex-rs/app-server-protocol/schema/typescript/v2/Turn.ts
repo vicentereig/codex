@@ -4,6 +4,7 @@
 import type { ThreadItem } from "./ThreadItem";
 import type { TurnError } from "./TurnError";
 import type { TurnItemsView } from "./TurnItemsView";
+import type { TurnPlanSnapshot } from "./TurnPlanSnapshot";
 import type { TurnStatus } from "./TurnStatus";
 
 export type Turn = {
@@ -19,6 +20,10 @@ items: Array<ThreadItem>,
  * Describes how much of `items` has been loaded for this turn.
  */
 itemsView: TurnItemsView, status: TurnStatus,
+/**
+ * Latest durable checklist reported for this exact turn, if one was observed.
+ */
+plan: TurnPlanSnapshot | null,
 /**
  * Only populated when the Turn's status is failed.
  */

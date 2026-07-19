@@ -42,6 +42,8 @@ impl App {
                 );
                 self.refresh_mcp_startup_expected_servers_from_config();
                 self.chat_widget.finish_mcp_startup_after_lag();
+                self.agent_runtime.mark_stream_stale();
+                self.refresh_agent_workspace();
             }
             AppServerEvent::ServerNotification(notification) => {
                 self.handle_server_notification_event(app_server_client, notification)
@@ -64,6 +66,8 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        self.agent_runtime
+            .observe(self.primary_thread_id, &notification);
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -168,6 +172,7 @@ impl App {
                 if let Err(err) = result {
                     tracing::warn!("failed to enqueue app-server notification: {err}");
                 }
+                self.refresh_agent_workspace();
                 return;
             }
             ServerNotificationThreadTarget::InvalidThreadId(thread_id) => {
@@ -188,6 +193,7 @@ impl App {
 
         self.chat_widget
             .handle_server_notification(notification, /*replay_kind*/ None);
+        self.refresh_agent_workspace();
     }
 
     async fn handle_server_request_event(

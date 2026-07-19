@@ -23,6 +23,7 @@ impl ChatWidget {
                 items_view: _,
                 items,
                 status,
+                plan,
                 error,
                 started_at,
                 completed_at,
@@ -32,6 +33,25 @@ impl ChatWidget {
                 self.turn_lifecycle.last_turn_id = Some(turn_id.clone());
                 self.last_non_retry_error = None;
                 self.on_task_started();
+            }
+            if let Some(plan) = plan {
+                self.on_plan_update(UpdatePlanArgs {
+                    explanation: plan.explanation,
+                    plan: plan
+                        .plan
+                        .into_iter()
+                        .map(|step| UpdatePlanItemArg {
+                            step: step.step,
+                            status: match step.status {
+                                TurnPlanStepStatus::Pending => UpdatePlanItemStatus::Pending,
+                                TurnPlanStepStatus::InProgress => UpdatePlanItemStatus::InProgress,
+                                TurnPlanStepStatus::Completed => UpdatePlanItemStatus::Completed,
+                            },
+                        })
+                        .collect(),
+                    revision: plan.revision,
+                    updated_at: plan.updated_at,
+                });
             }
             for item in items {
                 if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {
@@ -56,6 +76,7 @@ impl ChatWidget {
                             items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                             items: Vec::new(),
                             status,
+                            plan: None,
                             error,
                             started_at,
                             completed_at,

@@ -59,6 +59,7 @@ use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -216,6 +217,152 @@ async fn thread_read_can_include_turns() -> Result<()> {
         other => panic!("expected user message item, got {other:?}"),
     }
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_backfills_runtime_identity_topology_and_latest_plan() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let store_id = Uuid::new_v4().to_string();
+    create_config_toml_with_thread_store(codex_home.path(), &store_id)?;
+    let store = InMemoryThreadStore::for_id(store_id.clone());
+    let _in_memory_store = InMemoryThreadStoreId { store_id };
+    let parent_thread_id = codex_protocol::ThreadId::default();
+    let thread_id = codex_protocol::ThreadId::default();
+
+    store
+        .create_thread(CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: Some(parent_thread_id),
+            source: ProtocolSessionSource::Cli,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: Default::default(),
+            subagent_history_start_ordinal: None,
+            initial_window_id: Uuid::now_v7().to_string(),
+            metadata: ThreadPersistenceMetadata {
+                cwd: None,
+                model_provider: "test-provider".to_string(),
+                memory_mode: ThreadMemoryMode::Disabled,
+            },
+        })
+        .await?;
+    store
+        .update_thread_metadata(UpdateThreadMetadataParams {
+            thread_id,
+            patch: ThreadMetadataPatch {
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(Some(ReasoningEffort::XHigh)),
+                ..Default::default()
+            },
+            include_archived: true,
+        })
+        .await?;
+    let first_plan: RolloutItem = serde_json::from_value(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "plan_update",
+            "explanation": "initial",
+            "plan": [{"step": "inspect", "status": "in_progress"}],
+            "revision": "revision-1",
+            "updated_at": 100
+        }
+    }))?;
+    let latest_plan: RolloutItem = serde_json::from_value(json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "plan_update",
+            "explanation": "latest",
+            "plan": [
+                {"step": "inspect", "status": "completed"},
+                {"step": "implement", "status": "in_progress"}
+            ],
+            "revision": "revision-2",
+            "updated_at": 200
+        }
+    }))?;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                paginated_turn_started("turn-1"),
+                first_plan,
+                latest_plan,
+                paginated_turn_completed("turn-1"),
+            ],
+        })
+        .await?;
+
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(loader_overrides.clone())
+        .build()
+        .await?;
+    let client = in_process::start(InProcessStartArgs {
+        arg0_paths: Arg0DispatchPaths::default(),
+        config: Arc::new(config),
+        cli_overrides: Vec::new(),
+        loader_overrides,
+        strict_config: false,
+        cloud_config_bundle: CloudConfigBundleLoader::default(),
+        thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+        feedback: CodexFeedback::new(),
+        log_db: None,
+        state_db: None,
+        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        config_warnings: Vec::new(),
+        session_source: SessionSource::Cli.into(),
+        enable_codex_api_key_env: false,
+        initialize: InitializeParams {
+            client_info: ClientInfo {
+                name: "codex-app-server-tests".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
+        },
+        channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await?;
+    let result = client
+        .request(ClientRequest::ThreadRead {
+            request_id: RequestId::Integer(1),
+            params: ThreadReadParams {
+                thread_id: thread_id.to_string(),
+                include_turns: true,
+            },
+        })
+        .await?
+        .expect("thread/read should succeed");
+    let thread = &result["thread"];
+
+    assert_eq!(thread["parentThreadId"], json!(parent_thread_id));
+    assert_eq!(thread["model"], "gpt-5.6-terra");
+    assert_eq!(thread["reasoningEffort"], "xhigh");
+    assert_eq!(thread["turns"][0]["plan"]["explanation"], "latest");
+    assert_eq!(thread["turns"][0]["plan"]["revision"], "revision-2");
+    assert_eq!(thread["turns"][0]["plan"]["updatedAt"], 200);
+    assert_eq!(
+        thread["turns"][0]["plan"]["plan"],
+        json!([
+            {"step": "inspect", "status": "completed"},
+            {"step": "implement", "status": "inProgress"}
+        ])
+    );
+    client.shutdown().await?;
 
     Ok(())
 }
@@ -1710,6 +1857,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
             ],
             items_view: TurnItemsView::Summary,
             status: TurnStatus::Completed,
+            plan: None,
             error: None,
             started_at: Some(10),
             completed_at: Some(20),
@@ -1733,6 +1881,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
             items: Vec::new(),
             items_view: TurnItemsView::NotLoaded,
             status: TurnStatus::Interrupted,
+            plan: None,
             error: None,
             started_at: Some(10),
             completed_at: None,

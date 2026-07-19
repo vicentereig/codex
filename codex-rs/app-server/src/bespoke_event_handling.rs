@@ -163,6 +163,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     id: payload.turn_id.clone(),
                     items: Vec::new(),
                     items_view: TurnItemsView::NotLoaded,
+                    plan: None,
                     error: None,
                     status: TurnStatus::InProgress,
                     started_at: payload.started_at,
@@ -1266,6 +1267,7 @@ async fn emit_turn_completed_with_status(
             id: event_turn_id,
             items: vec![],
             items_view: TurnItemsView::NotLoaded,
+            plan: None,
             error: turn_completion_metadata.error,
             status: turn_completion_metadata.status,
             started_at: turn_completion_metadata.started_at,
@@ -3665,6 +3667,8 @@ mod tests {
                     status: StepStatus::Completed,
                 },
             ],
+            revision: None,
+            updated_at: None,
         };
 
         let conversation_id = ThreadId::new();

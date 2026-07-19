@@ -1,0 +1,18 @@
+---
+source: tui/src/agent_runtime/gallery_tests.rs
+expression: rendered
+---
+Agent status gallery · observed 2026-07-19T12:34:56Z · pricing-v1
+› └─ root              working · checklist 2/4
+  ├─ research/boe      waiting · checklist 3/5
+  │ ├─ tui             finished · checklist 4/4
+  │ └─ protocol        failed · closed · checklist 1/3
+  ├─ review            needs approval · no checklist observed
+  └─ orphan            status unavailable · parent unknown
+  └─ deep/branch/task  working · +7 more agents
+  selected · /root/research/boe/tui · Terra/high
+  └ reported checklist · exact turn turn-0002
+    ✔ Compare published instruments 你 好 😀
+    □ Trace event flow and preserve reconnect truth
+    □ Add deterministic snapshots
+  tokens unavailable · est. cost unavailable

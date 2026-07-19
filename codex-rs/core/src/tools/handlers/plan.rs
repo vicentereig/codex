@@ -87,7 +87,12 @@ impl PlanHandler {
             ));
         }
 
-        let args = parse_update_plan_arguments(&arguments)?;
+        let mut args = parse_update_plan_arguments(&arguments)?;
+        args.revision = Some(uuid::Uuid::now_v7().to_string());
+        args.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok());
         session
             .send_event(turn.as_ref(), EventMsg::PlanUpdate(args))
             .await;

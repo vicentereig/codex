@@ -20,6 +20,8 @@ use crate::protocol::v2::Turn;
 use crate::protocol::v2::TurnError as V2TurnError;
 use crate::protocol::v2::TurnError;
 use crate::protocol::v2::TurnItemsView;
+use crate::protocol::v2::TurnPlanSnapshot;
+use crate::protocol::v2::TurnPlanStep;
 use crate::protocol::v2::TurnStatus;
 use crate::protocol::v2::UserInput;
 #[cfg(test)]
@@ -380,6 +382,7 @@ impl ThreadHistoryBuilder {
             EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
             EventMsg::TurnStarted(payload) => self.handle_turn_started(payload),
             EventMsg::TurnComplete(payload) => self.handle_turn_complete(payload),
+            EventMsg::PlanUpdate(payload) => self.handle_plan_update(payload),
             _ => {}
         }
     }
@@ -1281,6 +1284,20 @@ impl ThreadHistoryBuilder {
         }
     }
 
+    fn handle_plan_update(&mut self, payload: &codex_protocol::plan_tool::UpdatePlanArgs) {
+        self.ensure_turn().plan = Some(TurnPlanSnapshot {
+            explanation: payload.explanation.clone(),
+            plan: payload
+                .plan
+                .iter()
+                .cloned()
+                .map(TurnPlanStep::from)
+                .collect(),
+            revision: payload.revision.clone(),
+            updated_at: payload.updated_at,
+        });
+    }
+
     /// Marks the current turn as containing a persisted compaction marker.
     ///
     /// This keeps compaction-only legacy turns from being dropped by
@@ -1318,7 +1335,11 @@ impl ThreadHistoryBuilder {
 
     fn finish_current_turn(&mut self) {
         if let Some(turn) = self.current_turn.take() {
-            if turn.items.is_empty() && !turn.opened_explicitly && !turn.saw_compaction {
+            if turn.items.is_empty()
+                && turn.plan.is_none()
+                && !turn.opened_explicitly
+                && !turn.saw_compaction
+            {
                 return;
             }
             self.turns.push(Turn::from(turn));
@@ -1336,6 +1357,7 @@ impl ThreadHistoryBuilder {
         PendingTurn {
             id,
             items: Vec::new(),
+            plan: None,
             error: None,
             status: TurnStatus::Completed,
             started_at: None,
@@ -1518,6 +1540,7 @@ fn upsert_turn_item(items: &mut Vec<ThreadItem>, item: ThreadItem) -> &ThreadIte
 struct PendingTurn {
     id: String,
     items: Vec<ThreadItem>,
+    plan: Option<TurnPlanSnapshot>,
     error: Option<TurnError>,
     status: TurnStatus,
     started_at: Option<i64>,
@@ -1556,6 +1579,7 @@ impl From<PendingTurn> for Turn {
             id: value.id,
             items: value.items,
             items_view: TurnItemsView::Full,
+            plan: value.plan,
             error: value.error,
             status: value.status,
             started_at: value.started_at,
@@ -1571,6 +1595,7 @@ impl From<&PendingTurn> for Turn {
             id: value.id.clone(),
             items: value.items.clone(),
             items_view: TurnItemsView::Full,
+            plan: value.plan.clone(),
             error: value.error.clone(),
             status: value.status.clone(),
             started_at: value.started_at,
@@ -1601,6 +1626,9 @@ mod tests {
     use codex_protocol::models::MessagePhase as CoreMessagePhase;
     use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
     use codex_protocol::parse_command::ParsedCommand;
+    use codex_protocol::plan_tool::PlanItemArg;
+    use codex_protocol::plan_tool::StepStatus;
+    use codex_protocol::plan_tool::UpdatePlanArgs;
     use codex_protocol::protocol::AgentMessageEvent;
     use codex_protocol::protocol::AgentReasoningEvent;
     use codex_protocol::protocol::AgentReasoningRawContentEvent;
@@ -1631,6 +1659,51 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use uuid::Uuid;
+
+    #[test]
+    fn replays_only_the_latest_plan_snapshot_for_a_turn() {
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            trace_id: None,
+            started_at: Some(10),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_event(&EventMsg::PlanUpdate(UpdatePlanArgs {
+            explanation: Some("first".to_string()),
+            plan: vec![PlanItemArg {
+                step: "inspect".to_string(),
+                status: StepStatus::InProgress,
+            }],
+            revision: Some("revision-1".to_string()),
+            updated_at: Some(100),
+        }));
+        builder.handle_event(&EventMsg::PlanUpdate(UpdatePlanArgs {
+            explanation: Some("latest".to_string()),
+            plan: vec![PlanItemArg {
+                step: "inspect".to_string(),
+                status: StepStatus::Completed,
+            }],
+            revision: Some("revision-2".to_string()),
+            updated_at: Some(200),
+        }));
+
+        let turns = builder.finish();
+
+        assert_eq!(
+            turns[0].plan,
+            Some(TurnPlanSnapshot {
+                explanation: Some("latest".to_string()),
+                plan: vec![TurnPlanStep {
+                    step: "inspect".to_string(),
+                    status: crate::protocol::v2::TurnPlanStepStatus::Completed,
+                }],
+                revision: Some("revision-2".to_string()),
+                updated_at: Some(200),
+            })
+        );
+    }
 
     #[test]
     fn builds_multiple_turns_with_reasoning_items() {
@@ -2261,6 +2334,7 @@ mod tests {
             Turn {
                 id: "turn-image".into(),
                 status: TurnStatus::Completed,
+                plan: None,
                 error: None,
                 started_at: None,
                 completed_at: None,
@@ -3673,6 +3747,7 @@ mod tests {
             vec![Turn {
                 id: "turn-compact".into(),
                 status: TurnStatus::Completed,
+                plan: None,
                 error: None,
                 started_at: None,
                 completed_at: None,
@@ -3946,6 +4021,7 @@ mod tests {
             Turn {
                 id: "turn-a".into(),
                 status: TurnStatus::Completed,
+                plan: None,
                 error: None,
                 started_at: None,
                 completed_at: None,

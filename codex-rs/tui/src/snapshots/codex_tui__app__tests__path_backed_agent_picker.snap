@@ -5,6 +5,11 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
   Subagents
   Select an agent to watch. ⌥ + ← previous, ⌥ + → next.
 
-› 1. • /root/worker  00000000-0000-0000-0000-000000000123
+› 1. [working] /root/worker  00000000-0000-0000-0000-000000000123
+
+  /root/worker
+  thread 00000000-0000-0000-0000-000000000123
+  lifecycle · working
+  point-in-time telemetry unavailable
 
   Press enter to confirm or esc to go back

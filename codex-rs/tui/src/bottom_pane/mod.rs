@@ -115,6 +115,7 @@ pub(crate) use footer::GoalStatusIndicator;
 pub(crate) use footer::goal_status_indicator_line;
 pub(crate) use list_selection_view::ColumnWidthMode;
 pub(crate) use list_selection_view::ListSelectionView;
+pub(crate) use list_selection_view::ListSelectionViewRefresh;
 pub(crate) use list_selection_view::OnSelectionChangedCallback;
 pub(crate) use list_selection_view::SelectionRowDisplay;
 pub(crate) use list_selection_view::SelectionToggle;
@@ -1205,6 +1206,21 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.selected_index())
+    }
+
+    pub(crate) fn refresh_selection_view_if_active(
+        &mut self,
+        view_id: &'static str,
+        refresh: list_selection_view::ListSelectionViewRefresh,
+    ) -> bool {
+        let Some(view) = self.view_stack.last_mut() else {
+            return false;
+        };
+        if view.view_id() != Some(view_id) || !view.refresh_selection_contents(refresh) {
+            return false;
+        }
+        self.request_redraw();
+        true
     }
 
     pub(crate) fn active_tab_id_for_active_view(&self, view_id: &'static str) -> Option<&str> {

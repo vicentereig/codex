@@ -30,7 +30,6 @@ use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::McpElicitationApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::bottom_pane::PermissionsApprovalRequest;
-use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
@@ -60,8 +59,6 @@ use crate::model_catalog::ModelCatalog;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
-use crate::multi_agents::agent_picker_status_dot_spans;
-use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
 use crate::multi_agents::sub_agent_activity_display;
@@ -201,7 +198,6 @@ use toml::Value as TomlValue;
 use uuid::Uuid;
 mod agent_message_consolidation;
 mod agent_navigation;
-mod agent_status_feed;
 mod app_server_event_targets;
 mod app_server_events;
 pub(crate) mod app_server_requests;
@@ -572,6 +568,8 @@ pub(crate) struct App {
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+    agent_runtime: crate::agent_runtime::AgentRuntimeController,
+    agent_workspace: Option<crate::agent_runtime::AgentWorkspace>,
     agent_navigation: AgentNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     active_thread_id: Option<ThreadId>,
@@ -1065,6 +1063,8 @@ See the Codex keymap documentation for supported actions and examples."
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
+            agent_runtime: crate::agent_runtime::AgentRuntimeController::default(),
+            agent_workspace: None,
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
             active_thread_id: None,

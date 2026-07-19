@@ -1,8 +1,10 @@
 use super::CodexErrorInfo;
 use super::ThreadItem;
 use super::ThreadStatus;
+use super::TurnPlanStep;
 use super::TurnStatus;
 use codex_experimental_api_macros::ExperimentalApi;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
@@ -189,6 +191,12 @@ pub struct Thread {
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').
     pub model_provider: String,
+    /// Latest authoritative effective model, or `null` when unavailable.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Latest authoritative effective reasoning effort, or `null` when unavailable.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Unix timestamp (in seconds) when the thread was created.
     #[ts(type = "number")]
     pub created_at: i64,
@@ -241,6 +249,9 @@ pub struct Turn {
     #[serde(default)]
     pub items_view: TurnItemsView,
     pub status: TurnStatus,
+    /// Latest durable checklist reported for this exact turn, if one was observed.
+    #[serde(default)]
+    pub plan: Option<TurnPlanSnapshot>,
     /// Only populated when the Turn's status is failed.
     pub error: Option<TurnError>,
     /// Unix timestamp (in seconds) when the turn started.
@@ -252,6 +263,19 @@ pub struct Turn {
     /// Duration between turn start and completion in milliseconds, if known.
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnPlanSnapshot {
+    pub explanation: Option<String>,
+    pub plan: Vec<TurnPlanStep>,
+    /// Opaque identity for this checklist update, or `null` for legacy data.
+    pub revision: Option<String>,
+    /// Unix timestamp (seconds) when this update was accepted, or `null` when unavailable.
+    #[ts(type = "number | null")]
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

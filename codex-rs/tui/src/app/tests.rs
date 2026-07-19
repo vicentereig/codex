@@ -31,6 +31,7 @@ use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
+use crate::multi_agents::format_agent_picker_item_name;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
@@ -1446,20 +1447,21 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
     };
     assert_eq!(app.agent_navigation.get(&thread_id), Some(&expected_entry));
     let status = loop {
-        let event = app_event_rx.try_recv().expect("agent status history cell");
+        let event = app_event_rx
+            .try_recv()
+            .expect("agent snapshot history cell");
         if let AppEvent::InsertHistoryCell(cell) = event {
             let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-            if rendered.contains("/agent") {
+            if rendered.contains("Agent snapshot") {
                 break rendered;
             }
         }
     };
     assert_snapshot!(status, @r###"
-    /agent
-    Sub-agents running
-
-      • `/root/child`
-        No recent activity yet.
+    • Agent snapshot · last observed event #0
+      Point-in-time reported state · exact-turn checklists are agent-reported, not
+      verified
+      └─ no agents observed in this session
     "###);
 
     app.enqueue_thread_notification(
@@ -1794,6 +1796,19 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
         assert!(app.backfill_loaded_subagent_threads(&mut app_server).await);
         assert!(!app.agent_navigation.is_parent_owned(child_thread_ids[0]));
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
+        let runtime = app
+            .agent_runtime
+            .snapshot()
+            .expect("backfill initializes the agent runtime");
+        let runtime_thread_ids = runtime
+            .agents
+            .iter()
+            .map(|agent| agent.thread_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            runtime_thread_ids,
+            child_thread_ids.iter().copied().collect()
+        );
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
         app.select_agent_thread(&mut tui, &mut app_server, child_thread_ids[0])
@@ -2000,6 +2015,7 @@ async fn open_agent_picker_prompts_to_enable_multi_agent_when_disabled() -> Resu
     let _ = app.config.features.disable(Feature::Collab);
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
+    assert_matches!(app_event_rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2571,6 +2587,7 @@ async fn open_agent_picker_allows_existing_agent_threads_when_feature_is_disable
         .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
+    assert_matches!(app_event_rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -3271,6 +3288,8 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 ephemeral: false,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
+                model: None,
+                reasoning_effort: None,
                 created_at: 1,
                 updated_at: 2,
                 recency_at: Some(2),
@@ -3367,6 +3386,8 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 ephemeral: false,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
+                model: None,
+                reasoning_effort: None,
                 created_at: 1,
                 updated_at: 2,
                 recency_at: Some(2),
@@ -3430,6 +3451,8 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         ephemeral: false,
         history_mode: Default::default(),
         model_provider: "read-provider".to_string(),
+        model: None,
+        reasoning_effort: None,
         created_at: 1,
         updated_at: 2,
         recency_at: Some(2),
@@ -4485,6 +4508,8 @@ async fn make_test_app() -> App {
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
+        agent_runtime: crate::agent_runtime::AgentRuntimeController::default(),
+        agent_workspace: None,
         agent_navigation: AgentNavigationState::default(),
         side_threads: HashMap::new(),
         active_thread_id: None,
@@ -4552,6 +4577,8 @@ async fn make_test_app_with_channels() -> (
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
+            agent_runtime: crate::agent_runtime::AgentRuntimeController::default(),
+            agent_workspace: None,
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
             active_thread_id: None,
@@ -5120,6 +5147,7 @@ fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItem>) -> Turn 
         items_view: codex_app_server_protocol::TurnItemsView::Full,
         items,
         status,
+        plan: None,
         error: None,
         started_at: None,
         completed_at: None,
@@ -6362,6 +6390,7 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
                         }],
                     }],
                     status: TurnStatus::Completed,
+                    plan: None,
                     error: None,
                     started_at: None,
                     completed_at: None,
@@ -6387,6 +6416,7 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
                         },
                     ],
                     status: TurnStatus::Completed,
+                    plan: None,
                     error: None,
                     started_at: None,
                     completed_at: None,

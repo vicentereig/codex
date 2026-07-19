@@ -17799,6 +17799,14 @@
             "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
             "type": "string"
           },
+          "model": {
+            "default": null,
+            "description": "Latest authoritative effective model, or `null` when unavailable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "modelProvider": {
             "description": "Model provider used for this thread (for example, 'openai').",
             "type": "string"
@@ -17827,6 +17835,18 @@
           "preview": {
             "description": "Usually the first user message in the thread, if available.",
             "type": "string"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Latest authoritative effective reasoning effort, or `null` when unavailable."
           },
           "recencyAt": {
             "description": "Unix timestamp (in seconds) used for thread recency ordering.",
@@ -20750,6 +20770,18 @@
             "default": "full",
             "description": "Describes how much of `items` has been loaded for this turn."
           },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/TurnPlanSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Latest durable checklist reported for this exact turn, if one was observed."
+          },
           "startedAt": {
             "description": "Unix timestamp (in seconds) when the turn started.",
             "format": "int64",
@@ -20925,6 +20957,41 @@
           "turnId"
         ],
         "title": "TurnModerationMetadataNotification",
+        "type": "object"
+      },
+      "TurnPlanSnapshot": {
+        "properties": {
+          "explanation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "items": {
+              "$ref": "#/definitions/v2/TurnPlanStep"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "Opaque identity for this checklist update, or `null` for legacy data.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAt": {
+            "description": "Unix timestamp (seconds) when this update was accepted, or `null` when unavailable.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "plan"
+        ],
         "type": "object"
       },
       "TurnPlanStep": {

@@ -19,11 +19,17 @@ pub struct PlanItemArg {
     pub status: StepStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatePlanArgs {
     /// Arguments for the `update_plan` todo/checklist tool (not plan mode).
     #[serde(default)]
     pub explanation: Option<String>,
     pub plan: Vec<PlanItemArg>,
+    /// Opaque identity assigned by Codex when this update is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Unix timestamp (seconds) when Codex accepted this update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
 }
