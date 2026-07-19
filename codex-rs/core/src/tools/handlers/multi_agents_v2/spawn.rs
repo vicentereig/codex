@@ -105,11 +105,12 @@ async fn handle_spawn_agent(
         .unwrap_or_else(AgentPath::root);
     let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
-    let spawned_agent = Box::pin(
+    let delegation = turn.delegation_ledger.reserve(new_agent_path.clone()).await;
+    let spawn_transaction = match Box::pin(
         session
             .services
             .agent_control
-            .spawn_agent_with_communication(
+            .begin_agent_spawn_with_communication(
                 config,
                 communication,
                 context,
@@ -123,7 +124,33 @@ async fn handle_spawn_agent(
             ),
     )
     .await
-    .map_err(collab_spawn_error)?;
+    {
+        Ok(spawn_transaction) => spawn_transaction,
+        Err(err) => {
+            turn.delegation_ledger.fail(delegation).await;
+            return Err(collab_spawn_error(err));
+        }
+    };
+    // The child is registered and targetable here, before its initial message starts a turn.
+    // Turn-scoped delegation ownership binds at this boundary rather than after delivery.
+    if turn
+        .delegation_ledger
+        .bind(delegation, spawn_transaction.thread_id())
+        .await
+        == crate::agent::delegation_ledger::DelegationBinding::Cancelled
+    {
+        drop(spawn_transaction);
+        return Err(FunctionCallError::RespondToModel(
+            "parent turn was cancelled before the spawned agent could receive work".to_string(),
+        ));
+    }
+    let spawned_agent = match spawn_transaction.deliver().await {
+        Ok(spawned_agent) => spawned_agent,
+        Err(err) => {
+            turn.delegation_ledger.fail(delegation).await;
+            return Err(collab_spawn_error(err));
+        }
+    };
     let new_thread_id = spawned_agent.thread_id;
     let agent_snapshot = session
         .services

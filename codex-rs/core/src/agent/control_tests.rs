@@ -643,6 +643,143 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
     ));
 }
 
+async fn v2_spawn_transaction(
+    harness: &AgentControlHarness,
+    parent_thread_id: ThreadId,
+) -> SpawnTransaction {
+    let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
+    harness
+        .control
+        .begin_agent_spawn_with_communication(
+            harness.config.clone(),
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                agent_path.clone(),
+                Vec::new(),
+                "inspect the repository".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Spawn, parent_thread_id),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(agent_path),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn transaction should begin")
+}
+
+#[tokio::test]
+async fn spawn_transaction_exposes_registered_child_before_initial_delivery() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("enable multi-agent v2");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let transaction = v2_spawn_transaction(&harness, parent_thread_id).await;
+    let child_thread_id = transaction.thread_id();
+
+    assert_eq!(transaction.metadata().agent_id, Some(child_thread_id));
+    assert_eq!(
+        harness
+            .control
+            .ensure_agent_known(child_thread_id)
+            .expect("child should be bindable before delivery")
+            .agent_id,
+        Some(child_thread_id)
+    );
+    assert!(harness.manager.get_thread(child_thread_id).await.is_ok());
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, _)| *thread_id == child_thread_id)
+    );
+
+    drop(transaction);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.manager.get_thread(child_thread_id).await.is_err()
+                && harness.control.ensure_agent_known(child_thread_id).is_err()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropping an undelivered transaction should roll it back");
+}
+
+#[tokio::test]
+async fn spawn_transaction_delivers_after_pre_delivery_binding() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("enable multi-agent v2");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let transaction = v2_spawn_transaction(&harness, parent_thread_id).await;
+    let child_thread_id = transaction.thread_id();
+    assert!(harness.control.ensure_agent_known(child_thread_id).is_ok());
+
+    let spawned_agent = transaction
+        .deliver()
+        .await
+        .expect("delivery should commit the spawn");
+    assert_eq!(spawned_agent.thread_id, child_thread_id);
+    assert!(harness.manager.captured_ops().iter().any(|(thread_id, op)| {
+        *thread_id == child_thread_id
+            && matches!(op, Op::InterAgentCommunication { communication } if communication.trigger_turn)
+    }));
+
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should succeed");
+}
+
+#[tokio::test]
+async fn spawn_transaction_delivery_failure_releases_registered_child() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("enable multi-agent v2");
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let transaction = v2_spawn_transaction(&harness, parent_thread_id).await;
+    let child_thread_id = transaction.thread_id();
+    let _ = harness.manager.remove_thread(&child_thread_id).await;
+
+    assert!(transaction.deliver().await.is_err());
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.control.ensure_agent_known(child_thread_id).is_err() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed delivery should release registry state");
+}
+
 #[tokio::test]
 async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let (home, mut config) = test_config().await;

@@ -511,6 +511,10 @@ impl Session {
         }
 
         if let Some(turn_context) = turn_context.as_deref() {
+            self.cancel_turn_delegations(turn_context).await;
+        }
+
+        if let Some(turn_context) = turn_context.as_deref() {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
         }
@@ -548,6 +552,8 @@ impl Session {
         let task = active_turn.task.take();
         let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
         if let Some(task) = task {
+            self.cancel_turn_delegations(task.turn_context.as_ref())
+                .await;
             self.handle_task_abort(task, reason.clone()).await;
         }
         if let Some(turn_context) = turn_context.as_deref() {
@@ -563,6 +569,21 @@ impl Session {
         }
 
         true
+    }
+
+    /// Cancel the direct child obligations owned by `turn_context` and fan out interruption only
+    /// after the ledger mutex has been released.
+    async fn cancel_turn_delegations(&self, turn_context: &TurnContext) {
+        // A child can bind while a parent is being aborted; `bind` sees the cancelled
+        // reservation and its spawn transaction rolls itself back before initial delivery.
+        let child_thread_ids = turn_context.delegation_ledger.cancel_pending().await;
+        for child_thread_id in child_thread_ids {
+            let _ = self
+                .services
+                .agent_control
+                .interrupt_agent(child_thread_id)
+                .await;
+        }
     }
 
     pub async fn on_task_finished(

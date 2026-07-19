@@ -52,6 +52,7 @@ use tracing::warn;
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
+pub(crate) use self::spawn::SpawnAgentTransaction as SpawnTransaction;
 
 mod execution;
 mod legacy;
@@ -697,6 +698,56 @@ impl AgentControl {
             .await
         {
             warn!("failed to persist thread-spawn edge: {err}");
+        }
+    }
+
+    /// Undo a spawn that became visible to the control plane but never completed its initial
+    /// delivery. This is deliberately idempotent: delivery errors and a cancelled owner future
+    /// may both attempt rollback, while only the first transaction drop schedules this work.
+    async fn rollback_spawn_transaction(
+        &self,
+        state: Arc<ThreadManagerState>,
+        child_thread: Arc<crate::CodexThread>,
+        child_thread_id: ThreadId,
+        session_source: Option<SessionSource>,
+    ) {
+        // Stop the child before releasing its capacity. Removing it first would make a still
+        // running child invisible to cancellation while its execution slot was reused.
+        if let Err(err) = child_thread.shutdown_and_wait().await {
+            warn!(
+                child_thread_id = %child_thread_id,
+                error = %err,
+                "failed to shut down undelivered spawned agent"
+            );
+            return;
+        }
+        let _ = state.remove_thread(&child_thread_id).await;
+        self.forget_v2_residency(child_thread_id);
+        self.state.release_spawned_thread(child_thread_id);
+
+        let Some(parent_thread_id) = session_source.and_then(|source| source.parent_thread_id())
+        else {
+            return;
+        };
+        if child_thread.config_snapshot().await.ephemeral {
+            return;
+        }
+        let Some(agent_graph_store) = state.agent_graph_store() else {
+            return;
+        };
+        if let Err(err) = agent_graph_store
+            .set_thread_spawn_edge_status(
+                child_thread_id,
+                codex_agent_graph_store::ThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+        {
+            warn!(
+                child_thread_id = %child_thread_id,
+                parent_thread_id = %parent_thread_id,
+                error = %err,
+                "failed to close rolled-back thread-spawn edge"
+            );
         }
     }
 

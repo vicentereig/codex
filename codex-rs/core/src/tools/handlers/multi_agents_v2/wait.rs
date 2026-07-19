@@ -182,10 +182,7 @@ impl Handler {
                 .resolve_agent_reference(session.thread_id, &turn.session_source, &target)
                 .await
                 .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-            let agent_metadata = session
-                .services
-                .agent_control
-                .get_agent_metadata(thread_id);
+            let agent_metadata = session.services.agent_control.get_agent_metadata(thread_id);
             if agent_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.agent_path.as_ref())
@@ -295,7 +292,8 @@ impl Handler {
             }
         }
         for (thread_id, agent) in &target_by_thread_id {
-            let status = visible_status(session.services.agent_control.get_status(*thread_id).await);
+            let status =
+                visible_status(session.services.agent_control.get_status(*thread_id).await);
             if is_final(&status) && !changed.iter().any(|changed| changed.agent == *agent) {
                 changed.push(ChangedAgent {
                     agent: agent.clone(),

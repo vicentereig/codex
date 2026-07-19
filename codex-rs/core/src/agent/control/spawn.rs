@@ -22,6 +22,170 @@ enum SpawnInitialInput {
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
 }
 
+/// A child thread that has been created and registered, but has not received its first input.
+///
+/// The transaction exists to close the interval between creating a child runtime and making its
+/// identity available to the owner that is responsible for cancellation. Callers must bind
+/// `thread_id` to that owner before calling [`Self::deliver`]. Dropping an undelivered
+/// transaction schedules the same rollback used for a failed delivery.
+pub(crate) struct SpawnAgentTransaction {
+    agent_control: AgentControl,
+    state: Arc<ThreadManagerState>,
+    thread: Arc<crate::CodexThread>,
+    thread_id: ThreadId,
+    metadata: AgentMetadata,
+    notification_source: Option<SessionSource>,
+    multi_agent_version: MultiAgentVersion,
+    initial_input: SpawnInitialInput,
+    rollback_armed: bool,
+}
+
+impl SpawnAgentTransaction {
+    pub(crate) fn thread_id(&self) -> ThreadId {
+        self.thread_id
+    }
+
+    pub(crate) fn metadata(&self) -> &AgentMetadata {
+        &self.metadata
+    }
+
+    /// Deliver the initial input and commit the externally visible portion of the spawn.
+    ///
+    /// A delivery failure is terminal for this transaction: it asynchronously shuts down and
+    /// removes the child before returning the original delivery error.
+    pub(crate) async fn deliver(mut self) -> CodexResult<LiveAgent> {
+        self.agent_control
+            .persist_thread_spawn_edge_for_source(
+                self.thread.as_ref(),
+                self.thread_id,
+                self.notification_source.as_ref(),
+            )
+            .await;
+
+        let delivery_result = match std::mem::replace(
+            &mut self.initial_input,
+            SpawnInitialInput::UserInput(Vec::new()),
+        ) {
+            SpawnInitialInput::UserInput(input) => {
+                self.agent_control
+                    .send_input_after_capacity_check(self.thread_id, &self.state, input)
+                    .await
+            }
+            SpawnInitialInput::InterAgentCommunication(communication, context) => {
+                self.agent_control
+                    .send_inter_agent_communication_after_capacity_check(
+                        self.thread_id,
+                        &self.state,
+                        communication,
+                        context,
+                    )
+                    .await
+            }
+        };
+        if let Err(err) = delivery_result {
+            self.schedule_rollback();
+            return Err(err);
+        }
+
+        self.emit_started_analytics().await;
+        // Clients should only observe a new child after its owner has had a chance to bind the
+        // transaction and the initial delivery has succeeded.
+        self.state.notify_thread_created(self.thread_id);
+
+        if self.multi_agent_version != MultiAgentVersion::V2 {
+            let child_reference = self
+                .metadata
+                .agent_path
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| self.thread_id.to_string());
+            self.agent_control.maybe_start_completion_watcher(
+                self.thread_id,
+                self.notification_source.clone(),
+                child_reference,
+                self.metadata.agent_path.clone(),
+            );
+        }
+
+        let status = self.agent_control.get_status(self.thread_id).await;
+        let metadata = self.metadata.clone();
+        self.disarm_rollback();
+        Ok(LiveAgent {
+            thread_id: self.thread_id,
+            metadata,
+            status,
+        })
+    }
+
+    async fn emit_started_analytics(&self) {
+        let Some(SessionSource::SubAgent(
+            subagent_source @ SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            },
+        )) = self.notification_source.as_ref()
+        else {
+            return;
+        };
+        let client_metadata = match self.state.get_thread(*parent_thread_id).await {
+            Ok(parent_thread) => parent_thread.session.app_server_client_metadata().await,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    parent_thread_id = %parent_thread_id,
+                    "skipping subagent thread analytics: failed to load parent thread metadata"
+                );
+                crate::session::session::AppServerClientMetadata {
+                    client_name: None,
+                    client_version: None,
+                }
+            }
+        };
+        let thread_config = self.thread.config_snapshot().await;
+        emit_subagent_session_started(
+            &self.thread.session.services.analytics_events_client,
+            client_metadata,
+            self.thread.session.session_id(),
+            self.thread_id,
+            thread_config.parent_thread_id,
+            thread_config,
+            subagent_source.clone(),
+        );
+    }
+
+    fn disarm_rollback(&mut self) {
+        self.rollback_armed = false;
+    }
+
+    fn schedule_rollback(&mut self) {
+        if !std::mem::replace(&mut self.rollback_armed, false) {
+            return;
+        }
+        let agent_control = self.agent_control.clone();
+        let state = Arc::clone(&self.state);
+        let thread = Arc::clone(&self.thread);
+        let thread_id = self.thread_id;
+        let notification_source = self.notification_source.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _ = handle.spawn(async move {
+                agent_control
+                    .rollback_spawn_transaction(state, thread, thread_id, notification_source)
+                    .await;
+            });
+        } else {
+            tracing::error!(
+                thread_id = %thread_id,
+                "cannot roll back undelivered spawned agent outside a Tokio runtime"
+            );
+        }
+    }
+}
+
+impl Drop for SpawnAgentTransaction {
+    fn drop(&mut self) {
+        self.schedule_rollback();
+    }
+}
+
 fn default_agent_nickname_list() -> Vec<&'static str> {
     AGENT_NAMES
         .lines()
@@ -203,12 +367,14 @@ impl AgentControl {
         initial_input: Vec<UserInput>,
         session_source: Option<SessionSource>,
     ) -> CodexResult<ThreadId> {
-        let spawned_agent = Box::pin(self.spawn_agent_internal(
+        let spawned_agent = Box::pin(self.begin_agent_spawn_internal(
             config,
             SpawnInitialInput::UserInput(initial_input),
             session_source,
             SpawnAgentOptions::default(),
         ))
+        .await?
+        .deliver()
         .await?;
         Ok(spawned_agent.thread_id)
     }
@@ -221,9 +387,32 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions, // TODO(jif) drop with new fork.
     ) -> CodexResult<LiveAgent> {
-        Box::pin(self.spawn_agent_internal(
+        Box::pin(self.begin_agent_spawn_internal(
             config,
             SpawnInitialInput::UserInput(initial_input),
+            session_source,
+            options,
+        ))
+        .await?
+        .deliver()
+        .await
+    }
+
+    /// Create and register a V2 communication child without delivering its first message.
+    ///
+    /// The caller can bind `SpawnAgentTransaction::thread_id` to its own cancellation state
+    /// before calling `SpawnAgentTransaction::deliver`.
+    pub(crate) async fn begin_agent_spawn_with_communication(
+        &self,
+        config: Config,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+        session_source: Option<SessionSource>,
+        options: SpawnAgentOptions,
+    ) -> CodexResult<SpawnAgentTransaction> {
+        Box::pin(self.begin_agent_spawn_internal(
+            config,
+            SpawnInitialInput::InterAgentCommunication(communication, context),
             session_source,
             options,
         ))
@@ -238,12 +427,15 @@ impl AgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
-        Box::pin(self.spawn_agent_internal(
+        self.begin_agent_spawn_with_communication(
             config,
-            SpawnInitialInput::InterAgentCommunication(communication, context),
+            communication,
+            context,
             session_source,
             options,
-        ))
+        )
+        .await?
+        .deliver()
         .await
     }
 
@@ -362,13 +554,13 @@ impl AgentControl {
         }
     }
 
-    async fn spawn_agent_internal(
+    async fn begin_agent_spawn_internal(
         &self,
         config: Config,
         initial_input: SpawnInitialInput,
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
-    ) -> CodexResult<LiveAgent> {
+    ) -> CodexResult<SpawnAgentTransaction> {
         let state = self.upgrade()?;
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
@@ -480,84 +672,16 @@ impl AgentControl {
             residency_slot.commit(new_thread.thread_id);
         }
 
-        if let Some(SessionSource::SubAgent(
-            subagent_source @ SubAgentSource::ThreadSpawn {
-                parent_thread_id, ..
-            },
-        )) = notification_source.as_ref()
-        {
-            let client_metadata = match state.get_thread(*parent_thread_id).await {
-                Ok(parent_thread) => parent_thread.session.app_server_client_metadata().await,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        parent_thread_id = %parent_thread_id,
-                        "skipping subagent thread analytics: failed to load parent thread metadata"
-                    );
-                    crate::session::session::AppServerClientMetadata {
-                        client_name: None,
-                        client_version: None,
-                    }
-                }
-            };
-            let thread_config = new_thread.thread.config_snapshot().await;
-            let parent_thread_id = thread_config.parent_thread_id;
-            emit_subagent_session_started(
-                &new_thread.thread.session.services.analytics_events_client,
-                client_metadata,
-                new_thread.thread.session.session_id(),
-                new_thread.thread_id,
-                parent_thread_id,
-                thread_config,
-                subagent_source.clone(),
-            );
-        }
-
-        // Notify a new thread has been created. This notification will be processed by clients
-        // to subscribe or drain this newly created thread.
-        // TODO(jif) add helper for drain
-        state.notify_thread_created(new_thread.thread_id);
-
-        self.persist_thread_spawn_edge_for_source(
-            new_thread.thread.as_ref(),
-            new_thread.thread_id,
-            notification_source.as_ref(),
-        )
-        .await;
-
-        match initial_input {
-            SpawnInitialInput::UserInput(input) => {
-                self.send_input_after_capacity_check(new_thread.thread_id, &state, input)
-                    .await?;
-            }
-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
-                self.send_inter_agent_communication_after_capacity_check(
-                    new_thread.thread_id,
-                    &state,
-                    communication,
-                    context,
-                )
-                .await?;
-            }
-        }
-        if multi_agent_version != MultiAgentVersion::V2 {
-            let child_reference = agent_metadata
-                .agent_path
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| new_thread.thread_id.to_string());
-            self.maybe_start_completion_watcher(
-                new_thread.thread_id,
-                notification_source,
-                child_reference,
-                agent_metadata.agent_path.clone(),
-            );
-        }
-
-        Ok(LiveAgent {
+        Ok(SpawnAgentTransaction {
+            agent_control: self.clone(),
+            state,
+            thread: new_thread.thread,
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
-            status: self.get_status(new_thread.thread_id).await,
+            notification_source,
+            multi_agent_version,
+            initial_input,
+            rollback_armed: true,
         })
     }
 

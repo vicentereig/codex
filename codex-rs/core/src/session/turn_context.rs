@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::delegation_ledger::DelegationLedger;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::shell_snapshot::ShellSnapshotFile;
 use codex_core_skills::HostSkillsSnapshot;
@@ -152,6 +153,8 @@ pub struct TurnContext {
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
     pub(crate) terminal_error: Arc<Mutex<Option<ErrorEvent>>>,
+    /// In-memory ownership of children delegated by this turn.
+    pub(crate) delegation_ledger: Arc<DelegationLedger>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
 }
@@ -593,6 +596,7 @@ impl Session {
             turn_skills: TurnSkillsContext::new(skills_snapshot),
             turn_timing_state: Arc::new(TurnTimingState::default()),
             terminal_error: Arc::new(Mutex::new(None)),
+            delegation_ledger: DelegationLedger::new(),
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
         }
