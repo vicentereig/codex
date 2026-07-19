@@ -11,7 +11,10 @@ use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
+use codex_protocol::protocol::SessionSource;
 use codex_tools::ToolSpec;
+use tokio::time::Instant;
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -110,33 +113,56 @@ async fn handle_spawn_agent(
     let delegation = turn.delegation_ledger.reserve(new_agent_path.clone()).await;
     let delegation_id = ThreadId::new().to_string();
     let run_id = ThreadId::new().to_string();
-    let spawn_transaction = match Box::pin(
-        session
-            .services
-            .agent_control
-            .begin_agent_spawn_with_communication(
-                config,
-                communication,
-                context,
-                Some(spawn_source),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                    fork_mode,
-                    parent_thread_id: Some(session.thread_id),
-                    parent_turn_id: Some(turn.sub_id.clone()),
-                    environments: Some(turn.environments.to_selections()),
-                    delegation_id: Some(delegation_id),
-                    run_id: Some(run_id),
-                    state_db: session.services.state_db.clone(),
-                },
-            ),
-    )
-    .await
-    {
-        Ok(spawn_transaction) => spawn_transaction,
-        Err(err) => {
-            turn.delegation_ledger.fail(delegation).await;
-            return Err(collab_spawn_error(err));
+    let spawn_options = SpawnAgentOptions {
+        fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
+        fork_mode,
+        parent_thread_id: Some(session.thread_id),
+        parent_turn_id: Some(turn.sub_id.clone()),
+        environments: Some(turn.environments.to_selections()),
+        delegation_id: Some(delegation_id),
+        run_id: Some(run_id),
+        state_db: session.services.state_db.clone(),
+    };
+    let retry_deadline = Instant::now()
+        + std::time::Duration::from_millis(
+            turn.config.multi_agent_v2.default_wait_timeout_ms.max(0) as u64,
+        );
+    // A child holds one execution permit for its own active turn. Waiting for
+    // capacity from that turn can deadlock when it is the only worker, so only
+    // the root may defer a spawn within the current tool call.
+    let can_wait_for_capacity = !matches!(&turn.session_source, SessionSource::SubAgent(_));
+    let spawn_transaction = loop {
+        let observed_capacity_epoch = session.services.agent_control.execution_capacity_epoch();
+        match Box::pin(
+            session
+                .services
+                .agent_control
+                .begin_agent_spawn_with_communication(
+                    config.clone(),
+                    communication.clone(),
+                    context.clone(),
+                    Some(spawn_source.clone()),
+                    spawn_options.clone(),
+                ),
+        )
+        .await
+        {
+            Ok(spawn_transaction) => break spawn_transaction,
+            Err(CodexErr::AgentLimitReached { .. })
+                if can_wait_for_capacity
+                    && tokio::time::timeout_at(
+                        retry_deadline,
+                        session
+                            .services
+                            .agent_control
+                            .wait_for_execution_capacity_change(observed_capacity_epoch),
+                    )
+                    .await
+                    .is_ok() => {}
+            Err(err) => {
+                turn.delegation_ledger.fail(delegation).await;
+                return Err(collab_spawn_error(err));
+            }
         }
     };
     // The child is registered and targetable here, before its initial message starts a turn.

@@ -23,10 +23,10 @@ The resulting executable is `codex-rs/target/release/codex`. This release
 reports:
 
 ```text
-codex-cli 0.145.0-alpha.24-vicentes-version.0.8.0+openai.312caf176a
+codex-cli 0.145.0-alpha.24-vicentes-version.0.9.0+openai.312caf176a
 ```
 
-The first portion records the upstream Codex release, `vicentes-version.0.8.0`
+The first portion records the upstream Codex release, `vicentes-version.0.9.0`
 is this fork's release, and the build metadata records the exact upstream
 `main` commit on which the fork is based.
 

@@ -951,6 +951,9 @@ impl Session {
             }
         };
         if cleared_active_turn {
+            self.services
+                .agent_control
+                .notify_execution_capacity_changed();
             self.emit_thread_idle_lifecycle_if_idle().await;
         }
         // Regular items were flushed before this terminal event was appended; buffering

@@ -7,13 +7,17 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use tokio::sync::Notify;
 
 #[derive(Default)]
 pub(super) struct AgentExecutionLimiter {
     active: AtomicUsize,
     max_threads: OnceLock<usize>,
+    capacity_epoch: AtomicU64,
+    capacity_changed: Notify,
 }
 
 pub(crate) struct AgentExecutionGuard {
@@ -23,6 +27,7 @@ pub(crate) struct AgentExecutionGuard {
 impl Drop for AgentExecutionGuard {
     fn drop(&mut self) {
         self.limiter.active.fetch_sub(1, Ordering::AcqRel);
+        self.limiter.notify_capacity_changed();
     }
 }
 
@@ -80,6 +85,26 @@ impl AgentControl {
         is_execution_limited(multi_agent_version, session_source)
             .then(|| Arc::clone(&self.agent_execution_limiter).guard())
     }
+
+    /// Return the current capacity lifecycle epoch.
+    pub(crate) fn execution_capacity_epoch(&self) -> u64 {
+        self.agent_execution_limiter.capacity_epoch()
+    }
+
+    /// Wait until V2 execution or residency eligibility changes.
+    ///
+    /// The caller must repeat its admission check after this returns. The epoch
+    /// closes the race where capacity changes after admission fails but before
+    /// the waiter registers.
+    pub(crate) async fn wait_for_execution_capacity_change(&self, observed_epoch: u64) {
+        self.agent_execution_limiter
+            .wait_for_capacity_change(observed_epoch)
+            .await;
+    }
+
+    pub(crate) fn notify_execution_capacity_changed(&self) {
+        self.agent_execution_limiter.notify_capacity_changed();
+    }
 }
 
 impl AgentExecutionLimiter {
@@ -98,6 +123,27 @@ impl AgentExecutionLimiter {
     fn guard(self: Arc<Self>) -> AgentExecutionGuard {
         self.active.fetch_add(1, Ordering::AcqRel);
         AgentExecutionGuard { limiter: self }
+    }
+
+    fn capacity_epoch(&self) -> u64 {
+        self.capacity_epoch.load(Ordering::Acquire)
+    }
+
+    fn notify_capacity_changed(&self) {
+        self.capacity_epoch.fetch_add(1, Ordering::AcqRel);
+        self.capacity_changed.notify_waiters();
+    }
+
+    async fn wait_for_capacity_change(&self, observed_epoch: u64) {
+        loop {
+            // Register before testing the epoch so a transition cannot be
+            // missed between the observation and the await.
+            let notified = self.capacity_changed.notified();
+            if self.capacity_epoch() != observed_epoch {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 

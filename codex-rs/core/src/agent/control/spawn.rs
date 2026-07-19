@@ -662,7 +662,7 @@ impl AgentControl {
         ) {
             let agent_path = session_source
                 .as_ref()
-                .and_then(|source| source.get_agent_path())
+                .and_then(codex_protocol::protocol::SessionSource::get_agent_path)
                 .map(|path| path.to_string())
                 .unwrap_or_else(|| "/root/unknown".to_string());
             state_db

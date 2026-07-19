@@ -204,7 +204,7 @@ The path should be `~/.local/bin/codex`. Fork releases encode the upstream
 release, Vicente revision, and upstream base commit, for example:
 
 ```text
-codex-cli 0.145.0-alpha.24-vicentes-version.0.8.0+openai.312caf176a
+codex-cli 0.145.0-alpha.24-vicentes-version.0.9.0+openai.312caf176a
 ```
 
 ## Rebase on upstream
