@@ -1,6 +1,6 @@
 [package]
 name = "codex-cli"
-version = "0.145.0-alpha.24-vicentes-version.0.7.0+openai.312caf176a"
+version = "0.145.0-alpha.24-vicentes-version.0.8.0+openai.312caf176a"
 edition.workspace = true
 license.workspace = true
 build = "build.rs"

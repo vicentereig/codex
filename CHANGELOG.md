@@ -1,5 +1,11 @@
 The changelog can be found on the [releases page](https://github.com/openai/codex/releases).
 
+## Vicente Codex 0.8.0
+
+- Document fork-first setup and practical Luna-aware prompts for coordinated and durable delegation.
+
+Implementation: `2e11e5c001`.
+
 ## Vicente Codex 0.7.0
 
 - Persist delegation intents, delivery receipts, leases, retries, and terminal outcomes across restarts.
