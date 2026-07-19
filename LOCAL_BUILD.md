@@ -19,9 +19,16 @@ cd codex-rs
 cargo build --release -p codex-cli
 ```
 
-The resulting executable is `codex-rs/target/release/codex`.
-It reports `codex-cli 0.145.0-alpha.23-vicentes-version` so the personal build
-is distinguishable from the upstream package.
+The resulting executable is `codex-rs/target/release/codex`. This release
+reports:
+
+```text
+codex-cli 0.145.0-alpha.24-vicentes-version.0.2.0+openai.312caf176a
+```
+
+The first portion records the upstream Codex release, `vicentes-version.0.2.0`
+is this fork's release, and the build metadata records the exact upstream
+`main` commit on which the fork is based.
 
 ## Install locally
 
@@ -46,6 +53,10 @@ cd codex-rs
 cargo build --release -p codex-cli
 install -m 0755 target/release/codex "$HOME/.local/bin/codex"
 ```
+
+Fork releases use annotated tags such as `vicente-v0.2.0`. The tag message
+records the complete upstream base SHA as well as its upstream Rust release
+tag.
 
 ## Configure Luna subagents
 

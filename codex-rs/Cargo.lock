@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "codex-cli"
-version = "0.145.0-alpha.23-vicentes-version"
+version = "0.145.0-alpha.24-vicentes-version.0.2.0+openai.312caf176a"
 dependencies = [
  "anyhow",
  "app_test_support",
