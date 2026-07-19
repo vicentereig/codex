@@ -5,6 +5,71 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 impl StateRuntime {
+    /// Reconstruct all durable obligations for a parent turn in stable update order.
+    pub async fn list_delegations_for_parent(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<crate::DurableDelegationRecord>> {
+        let rows = sqlx::query(
+            "SELECT delegation_id, run_id, parent_thread_id, child_thread_id, agent_path, status, version, attempt, lease_epoch, outcome, last_error, terminal_event_id, delivery_receipt FROM delegations WHERE parent_thread_id = ? ORDER BY updated_at_ms, delegation_id",
+        )
+        .bind(parent_thread_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let status = row
+                    .try_get::<String, _>("status")?
+                    .parse::<crate::DurableDelegationStatus>()
+                    .map_err(|err| anyhow::anyhow!("invalid durable delegation status: {err}"))?;
+                Ok(crate::DurableDelegationRecord {
+                    delegation_id: row.try_get("delegation_id")?,
+                    run_id: row.try_get("run_id")?,
+                    parent_thread_id: row.try_get("parent_thread_id")?,
+                    child_thread_id: row.try_get("child_thread_id")?,
+                    agent_path: row.try_get("agent_path")?,
+                    status,
+                    version: row.try_get("version")?,
+                    attempt: row.try_get("attempt")?,
+                    lease_epoch: row.try_get("lease_epoch")?,
+                    outcome: row.try_get("outcome")?,
+                    last_error: row.try_get("last_error")?,
+                    terminal_event_id: row.try_get("terminal_event_id")?,
+                    delivery_receipt: row.try_get("delivery_receipt")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Decide whether a resumed parent may finalize. Detached and terminal records do not block;
+    /// unresolved records produce an explicit partial/unknown outcome.
+    pub async fn delegation_finalization_for_parent(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> anyhow::Result<crate::DelegationFinalization> {
+        let records = self.list_delegations_for_parent(parent_thread_id).await?;
+        if records.iter().any(|record| {
+            matches!(
+                record.status,
+                crate::DurableDelegationStatus::Unknown
+                    | crate::DurableDelegationStatus::Retryable
+                    | crate::DurableDelegationStatus::CancelRequested
+                    | crate::DurableDelegationStatus::Reserved
+                    | crate::DurableDelegationStatus::Bound
+                    | crate::DurableDelegationStatus::Running
+            )
+        }) {
+            return Ok(crate::DelegationFinalization::Blocked);
+        }
+        if records
+            .iter()
+            .any(|record| record.status == crate::DurableDelegationStatus::Failed)
+        {
+            return Ok(crate::DelegationFinalization::Partial);
+        }
+        Ok(crate::DelegationFinalization::Ready)
+    }
+
     /// Bounded exponential retry delay for a delegation attempt.
     pub fn delegation_retry_delay_ms(attempt: i64) -> i64 {
         let exponent = attempt.clamp(0, 9) as u32;

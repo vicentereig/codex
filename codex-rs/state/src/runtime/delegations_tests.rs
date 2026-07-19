@@ -189,3 +189,82 @@ async fn cancellation_requires_request_then_authoritative_confirmation() {
             .expect("stale cancellation")
     );
 }
+
+#[tokio::test]
+async fn resumed_parent_reconstructs_obligations_and_retains_terminal_records() {
+    let home = super::test_support::unique_temp_dir();
+    let runtime = StateRuntime::init(home, "test-provider".to_string())
+        .await
+        .expect("state runtime");
+    let parent = ThreadId::new();
+    runtime
+        .reserve_delegation("delegation-6", "run-6", parent, "/root/failed", 1)
+        .await
+        .expect("reservation");
+    assert_eq!(
+        runtime
+            .delegation_finalization_for_parent(parent)
+            .await
+            .expect("blocked status"),
+        crate::DelegationFinalization::Blocked
+    );
+    assert!(
+        runtime
+            .transition_delegation(
+                "delegation-6",
+                0,
+                crate::DurableDelegationStatus::Reserved,
+                crate::DurableDelegationStatus::Failed,
+                2,
+            )
+            .await
+            .expect("failure")
+    );
+    assert_eq!(
+        runtime
+            .delegation_finalization_for_parent(parent)
+            .await
+            .expect("partial status"),
+        crate::DelegationFinalization::Partial
+    );
+    assert_eq!(
+        runtime
+            .list_delegations_for_parent(parent)
+            .await
+            .expect("records")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn detached_delegation_does_not_block_resumed_parent() {
+    let home = super::test_support::unique_temp_dir();
+    let runtime = StateRuntime::init(home, "test-provider".to_string())
+        .await
+        .expect("state runtime");
+    let parent = ThreadId::new();
+    runtime
+        .reserve_delegation("delegation-7", "run-7", parent, "/root/detached", 1)
+        .await
+        .expect("reservation");
+    assert!(
+        runtime
+            .transition_delegation(
+                "delegation-7",
+                0,
+                crate::DurableDelegationStatus::Reserved,
+                crate::DurableDelegationStatus::Detached,
+                2,
+            )
+            .await
+            .expect("detach")
+    );
+    assert_eq!(
+        runtime
+            .delegation_finalization_for_parent(parent)
+            .await
+            .expect("ready status"),
+        crate::DelegationFinalization::Ready
+    );
+}
