@@ -57,9 +57,18 @@ model_reasoning_effort = "medium"
 [features.multi_agent_v2]
 expose_spawn_agent_model_overrides = true
 max_concurrent_threads_per_session = 4
+tool_namespace = "agents"
 ```
 
 The thread cap includes the root agent, so `4` leaves three slots for children. `expose_spawn_agent_model_overrides` adds `model` and `reasoning_effort` to `spawn_agent`.
+
+`tool_namespace = "agents"` is required since 2026-07-19: the Responses API
+rejects client-declared tools in the reserved `collaboration` namespace for
+models outside the server-side multi-agent allowlist (Luna is not on it), failing every
+turn with `Invalid Value: 'tools'` before the prompt reaches the model — see
+[openai/codex#31864](https://github.com/openai/codex/issues/31864). Any
+non-reserved name works; existing sessions keep their recorded tool surface,
+so start a fresh session after setting it.
 
 ### Select a backend or disable agents
 

@@ -68,6 +68,9 @@ model = "gpt-5.6-luna"
 [features.multi_agent_v2]
 enabled = true
 expose_spawn_agent_model_overrides = true
+# Required since 2026-07-19: the API rejects client tools in the reserved
+# `collaboration` namespace for non-allowlisted models (openai/codex#31864).
+tool_namespace = "agents"
 ```
 
 The feature setting forces the root session onto the v2 runtime. V2 accepts
