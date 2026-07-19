@@ -192,6 +192,20 @@ impl App {
         if matches!(key_event.code, KeyCode::Esc)
             && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         {
+            if self.should_return_to_primary_agent(key_event) {
+                if let Some(primary_thread_id) = self.primary_thread_id {
+                    let _ = self
+                        .select_agent_thread(tui, app_server, primary_thread_id)
+                        .await;
+                    if self.current_displayed_thread_id() == Some(primary_thread_id) {
+                        self.chat_widget.add_info_message(
+                            "Returned to the main agent.".to_string(),
+                            /*hint*/ None,
+                        );
+                    }
+                }
+                return;
+            }
             // Esc primes/advances backtracking only in normal (not working) mode
             // with the composer focused and empty. In any other state, forward
             // Esc so the active UI (e.g. status indicator, modals, popups)
@@ -253,6 +267,18 @@ impl App {
                 self.chat_widget.handle_key_event(key_event);
             }
         };
+    }
+
+    pub(super) fn should_return_to_primary_agent(&self, key_event: KeyEvent) -> bool {
+        matches!(key_event.code, KeyCode::Esc)
+            && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && self.primary_thread_id.is_some()
+            && self.current_displayed_thread_id() != self.primary_thread_id
+            && !self.chat_widget.side_conversation_active()
+            && self.chat_widget.is_normal_backtrack_mode()
+            && self.chat_widget.composer_is_empty()
+            && self.chat_widget.no_modal_or_popup_active()
+            && !self.chat_widget.should_handle_vim_insert_escape(key_event)
     }
 
     pub(super) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {

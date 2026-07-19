@@ -324,18 +324,28 @@ impl AgentNavigationState {
                             .as_deref()
                             .filter(|agent_path| !agent_path.trim().is_empty())
                     {
-                        return format!("`{agent_path}`");
+                        return format!("`{agent_path}` · Esc to main");
                     }
-                    format_agent_picker_item_name(
+                    let label = format_agent_picker_item_name(
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
                         is_primary,
-                    )
+                    );
+                    if is_primary {
+                        label
+                    } else {
+                        format!("{label} · Esc to main")
+                    }
                 })
                 .unwrap_or_else(|| {
-                    format_agent_picker_item_name(
+                    let label = format_agent_picker_item_name(
                         /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
-                    )
+                    );
+                    if is_primary {
+                        label
+                    } else {
+                        format!("{label} · Esc to main")
+                    }
                 }),
         )
     }
@@ -467,7 +477,7 @@ mod tests {
 
         assert_eq!(
             state.active_agent_label(Some(first_agent_id), Some(main_thread_id)),
-            Some("Robie [explorer]".to_string())
+            Some("Robie [explorer] · Esc to main".to_string())
         );
         assert_eq!(
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
