@@ -47,3 +47,38 @@ async fn failed_reservation_remains_terminal_when_bound_late() {
         DelegationBinding::Cancelled
     );
 }
+
+#[tokio::test]
+async fn completion_wins_over_later_cancellation() {
+    let ledger = DelegationLedger::new();
+    let reservation = ledger
+        .reserve(AgentPath::try_from("/root/worker").expect("path"))
+        .await;
+    let child_thread_id = ThreadId::new();
+    let _ = ledger.bind(reservation, child_thread_id).await;
+
+    ledger
+        .settle(child_thread_id, DelegationState::Completed)
+        .await;
+    assert_eq!(ledger.cancel_pending().await, Vec::<ThreadId>::new());
+    assert_eq!(
+        ledger.record(reservation).await.map(|record| record.2),
+        Some(DelegationState::Completed)
+    );
+}
+
+#[tokio::test]
+async fn detached_child_no_longer_blocks_required_outcome() {
+    let ledger = DelegationLedger::new();
+    let reservation = ledger
+        .reserve(AgentPath::try_from("/root/worker").expect("path"))
+        .await;
+    let child_thread_id = ThreadId::new();
+    let _ = ledger.bind(reservation, child_thread_id).await;
+
+    assert!(ledger.detach(child_thread_id).await);
+    assert_eq!(
+        ledger.wait_for_required_outcome().await,
+        Vec::<AgentPath>::new()
+    );
+}

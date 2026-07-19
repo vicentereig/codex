@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
+use crate::agent::delegation_ledger::DelegationState;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent_communication::AgentCommunicationContext;
@@ -152,6 +153,31 @@ async fn handle_spawn_agent(
         }
     };
     let new_thread_id = spawned_agent.thread_id;
+    let ledger = turn.delegation_ledger.clone();
+    let agent_control = session.services.agent_control.clone();
+    let _ = tokio::spawn(async move {
+        let Ok(mut status_rx) = agent_control.subscribe_status(new_thread_id).await else {
+            ledger.settle(new_thread_id, DelegationState::Failed).await;
+            return;
+        };
+        loop {
+            let state = match status_rx.borrow().clone() {
+                AgentStatus::Completed(_) => Some(DelegationState::Completed),
+                AgentStatus::Errored(_) | AgentStatus::Shutdown | AgentStatus::NotFound => {
+                    Some(DelegationState::Failed)
+                }
+                AgentStatus::Interrupted | AgentStatus::PendingInit | AgentStatus::Running => None,
+            };
+            if let Some(state) = state {
+                ledger.settle(new_thread_id, state).await;
+                return;
+            }
+            if status_rx.changed().await.is_err() {
+                ledger.settle(new_thread_id, DelegationState::Failed).await;
+                return;
+            }
+        }
+    });
     let agent_snapshot = session
         .services
         .agent_control

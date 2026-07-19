@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct DelegationReservation(u64);
@@ -18,8 +19,10 @@ pub(crate) struct DelegationReservation(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DelegationState {
     Pending,
+    Completed,
     Cancelled,
     Failed,
+    Detached,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +46,7 @@ struct DelegationRecord {
 pub(crate) struct DelegationLedger {
     next_reservation: AtomicU64,
     records: Mutex<BTreeMap<DelegationReservation, DelegationRecord>>,
+    changed: Notify,
 }
 
 impl DelegationLedger {
@@ -86,7 +90,31 @@ impl DelegationLedger {
             && record.state == DelegationState::Pending
         {
             record.state = DelegationState::Failed;
+            self.changed.notify_waiters();
         }
+    }
+
+    /// First terminal outcome wins over concurrent completion/cancellation.
+    pub(crate) async fn settle(&self, thread_id: ThreadId, state: DelegationState) {
+        let mut records = self.records.lock().await;
+        if let Some(record) = records.values_mut().find(|record| {
+            record.thread_id == Some(thread_id) && record.state == DelegationState::Pending
+        }) {
+            record.state = state;
+            self.changed.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn detach(&self, thread_id: ThreadId) -> bool {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.values_mut().find(|record| {
+            record.thread_id == Some(thread_id) && record.state == DelegationState::Pending
+        }) else {
+            return false;
+        };
+        record.state = DelegationState::Detached;
+        self.changed.notify_waiters();
+        true
     }
 
     /// Cancel all still-pending delegations and return the children that were already bound.
@@ -102,7 +130,47 @@ impl DelegationLedger {
                 }
             }
         }
+        self.changed.notify_waiters();
         child_thread_ids
+    }
+
+    /// Surface a failed cancellation as explicit partial work instead of claiming the child was
+    /// cancelled while it may still be running.
+    pub(crate) async fn mark_cancellation_failed(&self, thread_id: ThreadId) {
+        let mut records = self.records.lock().await;
+        if let Some(record) = records.values_mut().find(|record| {
+            record.thread_id == Some(thread_id) && record.state == DelegationState::Cancelled
+        }) {
+            record.state = DelegationState::Failed;
+            self.changed.notify_waiters();
+        }
+    }
+
+    /// Wait for all required records to settle and return failed/cancelled paths for an explicit
+    /// partial parent outcome. Detached records are intentionally excluded.
+    pub(crate) async fn wait_for_required_outcome(&self) -> Vec<AgentPath> {
+        loop {
+            let notified = self.changed.notified();
+            let records = self.records.lock().await;
+            if records
+                .values()
+                .any(|record| record.state == DelegationState::Pending)
+            {
+                drop(records);
+                notified.await;
+                continue;
+            }
+            return records
+                .values()
+                .filter(|record| {
+                    matches!(
+                        record.state,
+                        DelegationState::Failed | DelegationState::Cancelled
+                    )
+                })
+                .map(|record| record.path.clone())
+                .collect();
+        }
     }
 
     #[cfg(test)]

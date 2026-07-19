@@ -578,11 +578,17 @@ impl Session {
         // reservation and its spawn transaction rolls itself back before initial delivery.
         let child_thread_ids = turn_context.delegation_ledger.cancel_pending().await;
         for child_thread_id in child_thread_ids {
-            let _ = self
+            let interrupt_result = self
                 .services
                 .agent_control
                 .interrupt_agent(child_thread_id)
                 .await;
+            if interrupt_result.is_err() {
+                turn_context
+                    .delegation_ledger
+                    .mark_cancellation_failed(child_thread_id)
+                    .await;
+            }
         }
     }
 
@@ -602,6 +608,29 @@ impl Session {
         turn_context
             .turn_metadata_state
             .cancel_git_enrichment_task();
+
+        if abort_reason.is_none() {
+            let failed_paths = turn_context
+                .delegation_ledger
+                .wait_for_required_outcome()
+                .await;
+            if !failed_paths.is_empty() {
+                let failed_paths = failed_paths
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.send_event(
+                    turn_context.as_ref(),
+                    EventMsg::Warning(WarningEvent {
+                        message: format!(
+                            "Delegated work finished partially; these required agents did not complete: {failed_paths}"
+                        ),
+                    }),
+                )
+                .await;
+            }
+        }
 
         let turn_state = {
             let mut active = self.active_turn.lock().await;

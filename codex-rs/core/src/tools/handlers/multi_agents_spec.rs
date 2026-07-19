@@ -357,6 +357,26 @@ pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
     })
 }
 
+pub fn create_detach_agent_tool_v2() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(
+            "Canonical task path of a direct child to detach (from spawn_agent).".to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "detach_agent".to_string(),
+        description: "Detach a direct child from this turn's required work. The child continues running, but its result will no longer delay this turn's completion.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
+        output_schema: Some(agent_previous_status_output_schema(
+            "The agent status observed when it was detached.",
+        )),
+    })
+}
+
 fn agent_status_output_schema() -> Value {
     json!({
         "oneOf": [
