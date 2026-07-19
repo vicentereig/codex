@@ -11,16 +11,26 @@ impl StateRuntime {
         &self,
         now_ms: i64,
         limit: i64,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Vec<crate::DueDelegationDelivery>> {
         let rows = sqlx::query(
-            "SELECT delivery_id FROM delegation_delivery_outbox WHERE status = 'pending' AND retry_after_ms <= ? ORDER BY updated_at_ms, delivery_id LIMIT ?",
+            "SELECT delivery_id, delegation_id, run_id, attempt, payload_receipt, version, lease_epoch FROM delegation_delivery_outbox WHERE status = 'pending' AND retry_after_ms <= ? ORDER BY updated_at_ms, delivery_id LIMIT ?",
         )
         .bind(now_ms)
         .bind(limit.clamp(1, 1000))
         .fetch_all(self.pool.as_ref())
         .await?;
         rows.into_iter()
-            .map(|row| Ok(row.try_get("delivery_id")?))
+            .map(|row| {
+                Ok(crate::DueDelegationDelivery {
+                    delivery_id: row.try_get("delivery_id")?,
+                    delegation_id: row.try_get("delegation_id")?,
+                    run_id: row.try_get("run_id")?,
+                    attempt: row.try_get("attempt")?,
+                    payload_receipt: row.try_get("payload_receipt")?,
+                    version: row.try_get("version")?,
+                    lease_epoch: row.try_get("lease_epoch")?,
+                })
+            })
             .collect()
     }
 
@@ -41,6 +51,114 @@ impl StateRuntime {
         .execute(self.pool.as_ref())
         .await?;
         Ok(result.rows_affected())
+    }
+
+    async fn delegation_record(
+        &self,
+        delegation_id: &str,
+    ) -> anyhow::Result<Option<crate::DurableDelegationRecord>> {
+        let row = sqlx::query(
+            "SELECT delegation_id, run_id, parent_thread_id, parent_turn_id, child_thread_id, agent_path, status, version, attempt, lease_epoch, outcome, last_error, terminal_event_id, delivery_receipt FROM delegations WHERE delegation_id = ?",
+        )
+        .bind(delegation_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+        row.map(|row| {
+            let status = row
+                .try_get::<String, _>("status")?
+                .parse::<crate::DurableDelegationStatus>()
+                .map_err(|err| anyhow::anyhow!("invalid durable delegation status: {err}"))?;
+            Ok(crate::DurableDelegationRecord {
+                delegation_id: row.try_get("delegation_id")?,
+                run_id: row.try_get("run_id")?,
+                parent_thread_id: row.try_get("parent_thread_id")?,
+                parent_turn_id: row.try_get("parent_turn_id")?,
+                child_thread_id: row.try_get("child_thread_id")?,
+                agent_path: row.try_get("agent_path")?,
+                status,
+                version: row.try_get("version")?,
+                attempt: row.try_get("attempt")?,
+                lease_epoch: row.try_get("lease_epoch")?,
+                outcome: row.try_get("outcome")?,
+                last_error: row.try_get("last_error")?,
+                terminal_event_id: row.try_get("terminal_event_id")?,
+                delivery_receipt: row.try_get("delivery_receipt")?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn acknowledge_delegation_delivery(
+        &self,
+        delivery: &crate::DueDelegationDelivery,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegation_delivery_outbox SET status = 'acked', version = version + 1, updated_at_ms = ? WHERE delivery_id = ? AND version = ? AND lease_epoch = ? AND status = 'sent'",
+        )
+        .bind(now_ms)
+        .bind(&delivery.delivery_id)
+        .bind(delivery.version + 1)
+        .bind(delivery.lease_epoch + 1)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Reconcile a bounded batch of due deliveries using run/attempt receipts as the idempotency
+    /// key. A receipt already recorded is acknowledged; otherwise the lease is retried and an
+    /// exhausted attempt becomes Unknown rather than inferred success.
+    pub async fn reconcile_delegation_deliveries_once(
+        &self,
+        now_ms: i64,
+        lease_ms: i64,
+        max_attempts: i64,
+        limit: i64,
+    ) -> anyhow::Result<u64> {
+        let due = self.list_due_delegation_deliveries(now_ms, limit).await?;
+        let mut processed = 0;
+        for delivery in due {
+            if !self
+                .claim_delegation_delivery(
+                    &delivery.delivery_id,
+                    delivery.version,
+                    delivery.lease_epoch,
+                    now_ms,
+                    lease_ms,
+                )
+                .await?
+            {
+                continue;
+            }
+            let Some(record) = self.delegation_record(&delivery.delegation_id).await? else {
+                continue;
+            };
+            if record.delivery_receipt.as_deref() == Some(delivery.payload_receipt.as_str()) {
+                self.acknowledge_delegation_delivery(&delivery, now_ms)
+                    .await?;
+            } else if delivery.attempt >= max_attempts.max(1) {
+                self.reconcile_missing_delegation(
+                    &delivery.delegation_id,
+                    record.version,
+                    delivery.attempt,
+                    max_attempts,
+                    now_ms,
+                )
+                .await?;
+            } else {
+                self.schedule_delegation_retry(
+                    &delivery.delivery_id,
+                    delivery.version + 1,
+                    delivery.lease_epoch + 1,
+                    delivery.attempt,
+                    max_attempts,
+                    now_ms,
+                )
+                .await?;
+            }
+            processed += 1;
+        }
+        Ok(processed)
     }
 
     /// Acknowledge a terminal record while retaining it for a bounded audit window.

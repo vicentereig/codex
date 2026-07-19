@@ -151,6 +151,13 @@ async fn delivery_intent_and_receipt_are_versioned_and_idempotent() {
             .await
             .expect("duplicate intent")
     );
+    assert_eq!(
+        runtime
+            .reconcile_delegation_deliveries_once(3, 10, 2, 10)
+            .await
+            .expect("bounded reconciliation"),
+        1
+    );
     assert!(
         runtime
             .record_delegation_delivery_receipt("delegation-4", 2, 1, "run-4:1", 5)

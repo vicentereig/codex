@@ -47,6 +47,7 @@ pub use model::BackfillStats;
 pub use model::BackfillStatus;
 pub use model::DelegationFinalization;
 pub use model::DirectionalThreadSpawnEdgeStatus;
+pub use model::DueDelegationDelivery;
 pub use model::DurableDelegationRecord;
 pub use model::DurableDelegationStatus;
 pub use model::ExtractionOutcome;

@@ -36,6 +36,17 @@ pub struct DurableDelegationRecord {
     pub delivery_receipt: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueDelegationDelivery {
+    pub delivery_id: String,
+    pub delegation_id: String,
+    pub run_id: String,
+    pub attempt: i64,
+    pub payload_receipt: String,
+    pub version: i64,
+    pub lease_epoch: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelegationFinalization {
     Ready,
