@@ -1,20 +1,26 @@
 # Vicente's Codex
 
-Vicente's Codex is a Luna-aware fork for dependable, inspectable agent swarms. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
+Vicente's Codex is a Luna-aware fork for coordinating several agents with bounded results and explicit incomplete outcomes. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
 
 ## What this fork covers
 
-This fork covers two areas:
+### Available now
 
-- **Durable delegation** — targetable waits, turn-scoped join/cancel/detach, durable run identities, bounded retries, restart reconciliation, and explicit partial or unknown outcomes.
-- **Agent observability (`codex-90w`)** — research and design for truthful nested-agent navigation, plans, lifecycle status, model and effort visibility, usage, and cost. These notes guide the next TUI work; they do not claim features the current UI does not yet expose.
+- **V2 by default** — new sessions use `multi_agent_v2`; configuration can opt out, and resumed sessions keep their recorded backend.
+- **Turn-scoped coordination** — targetable waits plus live join, cancellation, and detach semantics. Waits return bounded, deterministic terminal summaries for live descendants.
+- **Bounded durable recovery** — stable run identities, delivery receipts, fenced retries, turn- and lease-scoped cancellation, retention, and explicit partial or unknown outcomes. Recovery maintenance runs at turn completion; it is not an autonomous background scheduler and does not reattach every child after a process restart.
+- **Agent workspace** — `/agent` shows nested paths, lifecycle, plans, requested and effective model/effort, token usage, and estimated cost when available.
+
+### Still evolving
+
+The TUI still has design work ahead for richer progress and telemetry views. Treat unavailable values and partial recovery as real states, not as evidence of success.
 
 ## Use this fork
 
 Clone the fork, build it, and put it first on your `PATH`:
 
 ```sh
-git clone <your-fork-url> vicentes-codex
+git clone https://github.com/vicentereig/codex.git vicentes-codex
 cd vicentes-codex/codex-rs
 cargo build --release -p codex-cli
 mkdir -p "$HOME/.local/bin"
@@ -31,7 +37,7 @@ Use Luna medium. Split this change into research, edit, and review tasks. Keep r
 ```
 
 ```text
-Use Luna high. Delegate this migration with durable run identities. After an interruption or restart, reconcile each child, retry within bounded limits, and report unknown or partial work instead of claiming success.
+Use Luna high. Delegate this migration with durable run identities. After an interruption or restart, report which children are recoverable, retry within bounded limits, and mark unknown or partial work instead of claiming success.
 ```
 
 ```text
