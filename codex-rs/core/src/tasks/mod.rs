@@ -643,6 +643,23 @@ impl Session {
 
         if abort_reason.is_none() {
             if let Some(state_db) = self.services.state_db.clone() {
+                let now_ms = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                if let Err(err) = state_db
+                    .reclaim_expired_delegation_delivery_leases(now_ms, 100)
+                    .await
+                {
+                    warn!(%err, "failed to reclaim expired delegation delivery leases");
+                }
+                if let Err(err) = state_db
+                    .reconcile_delegation_deliveries_once(now_ms, 30_000, 5, 100)
+                    .await
+                {
+                    warn!(%err, "failed to reconcile delegation deliveries");
+                }
                 match state_db
                     .delegation_finalization_for_parent(self.thread_id)
                     .await
