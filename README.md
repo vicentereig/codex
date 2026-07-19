@@ -2,6 +2,31 @@
 
 Upstream marks `gpt-5.6-luna` as a v1 multi-agent model. This personal fork lets Luna run as a `multi_agent_v2` root or child without changing the model catalog.
 
+## Use this fork
+
+Clone, build, and put the fork first on your `PATH`:
+
+```sh
+git clone <your-fork-url> codex-flo
+cd codex-flo/codex-rs
+cargo build --release -p codex-cli
+mkdir -p "$HOME/.local/bin"
+install -m 0755 target/release/codex "$HOME/.local/bin/codex"
+hash -r
+codex --version
+```
+
+Then start Codex with `gpt-5.6-luna`. Use these prompts to exercise the two
+codex-flo feature areas:
+
+```text
+Use Luna medium. Split this change into turn-scoped tasks: research, edit, and review. Keep required children joined before you finalize; detach only work I explicitly mark as background.
+```
+
+```text
+Use Luna high. Delegate this migration with durable run identities. On interruption or restart, reconcile each child, retry only within bounded limits, and report unknown or partial work instead of claiming success.
+```
+
 For the product overview and official docs, see [OpenAI's Codex README](CODEX_README.md). For detailed build notes, see [LOCAL_BUILD.md](LOCAL_BUILD.md).
 
 ## Configure it
