@@ -57,6 +57,7 @@ impl SpawnAgentTransaction {
         self.thread_id
     }
 
+    #[cfg(test)]
     pub(crate) fn metadata(&self) -> &AgentMetadata {
         &self.metadata
     }
@@ -489,26 +490,6 @@ impl AgentControl {
             session_source,
             options,
         ))
-        .await
-    }
-
-    pub(crate) async fn spawn_agent_with_communication(
-        &self,
-        config: Config,
-        communication: InterAgentCommunication,
-        context: AgentCommunicationContext,
-        session_source: Option<SessionSource>,
-        options: SpawnAgentOptions,
-    ) -> CodexResult<LiveAgent> {
-        self.begin_agent_spawn_with_communication(
-            config,
-            communication,
-            context,
-            session_source,
-            options,
-        )
-        .await?
-        .deliver()
         .await
     }
 

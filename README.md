@@ -27,6 +27,10 @@ Use Luna medium. Split this change into turn-scoped tasks: research, edit, and r
 Use Luna high. Delegate this migration with durable run identities. On interruption or restart, reconcile each child, retry only within bounded limits, and report unknown or partial work instead of claiming success.
 ```
 
+```text
+Deep-research this question: can a city reduce peak summer temperatures by 3–5°C without adding air-conditioning capacity? Before researching, show me the task breakdown, subagent tree, model and reasoning effort for each task, why each assignment needs that effort, the evidence standard, and the stopping condition. Use Luna low for case studies and primary sources, Luna medium for comparable measurements, Terra high for methodology and contradictions, Sol xhigh to challenge causal claims, and Sol ultra to synthesize a concise decision-ready report. Use nested agents for independent source review. Do not modify files. Cite primary sources, separate measured results from projections, and label uncertainty.
+```
+
 For the product overview and official docs, see [OpenAI's Codex README](CODEX_README.md). For detailed build notes, see [LOCAL_BUILD.md](LOCAL_BUILD.md).
 
 ## Configure it
