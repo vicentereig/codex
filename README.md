@@ -1,10 +1,10 @@
 # Luna-aware Codex
 
-Upstream marks `gpt-5.6-luna` as a v1 multi-agent model. This personal fork lets Luna run as a `multi_agent_v2` root or child without changing the model catalog.
+This fork lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
 
 ## Use this fork
 
-Clone, build, and put the fork first on your `PATH`:
+Clone the fork, build it, and put it first on your `PATH`:
 
 ```sh
 git clone <your-fork-url> codex-flo
@@ -16,27 +16,26 @@ hash -r
 codex --version
 ```
 
-Then start Codex with `gpt-5.6-luna`. Use these prompts to exercise the two
-codex-flo feature areas:
+Start Codex with `gpt-5.6-luna`. These prompts exercise coordination, recovery,
+and deliberate swarm planning:
 
 ```text
-Use Luna medium. Split this change into turn-scoped tasks: research, edit, and review. Keep required children joined before you finalize; detach only work I explicitly mark as background.
+Use Luna medium. Split this change into research, edit, and review tasks. Keep required children joined before you finalize. Detach only work I mark as background.
 ```
 
 ```text
-Use Luna high. Delegate this migration with durable run identities. On interruption or restart, reconcile each child, retry only within bounded limits, and report unknown or partial work instead of claiming success.
+Use Luna high. Delegate this migration with durable run identities. After an interruption or restart, reconcile each child, retry within bounded limits, and report unknown or partial work instead of claiming success.
 ```
 
 ```text
-Deep-research this question: can a city reduce peak summer temperatures by 3–5°C without adding air-conditioning capacity? Before researching, show me the task breakdown, subagent tree, model and reasoning effort for each task, why each assignment needs that effort, the evidence standard, and the stopping condition. Use Luna low for case studies and primary sources, Luna medium for comparable measurements, Terra high for methodology and contradictions, Sol xhigh to challenge causal claims, and Sol ultra to synthesize a concise decision-ready report. Use nested agents for independent source review. Do not modify files. Cite primary sources, separate measured results from projections, and label uncertainty.
+Investigate this question: can a city reduce peak summer temperatures by 3–5°C without adding air-conditioning capacity? Before researching, show the task breakdown, subagent tree, model and effort for each task, the evidence standard, and the stopping condition. Use Luna low for primary sources, Luna medium for comparable measurements, Terra high for methodology and contradictions, Sol xhigh to challenge causal claims, and Sol ultra to synthesize a decision-ready report. Use nested agents for independent source review. Do not modify files. Separate measured results from projections and label uncertainty.
 ```
 
 For the product overview and official docs, see [OpenAI's Codex README](CODEX_README.md). For detailed build notes, see [LOCAL_BUILD.md](LOCAL_BUILD.md).
 
 ## Configure it
 
-`multi_agent_v2` is stable and enabled by default in this fork. Add settings
-only to customize its behavior:
+`multi_agent_v2` is enabled by default. Add settings only to change its behavior:
 
 ```toml
 model = "gpt-5.6-luna"
