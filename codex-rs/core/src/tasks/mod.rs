@@ -610,6 +610,42 @@ impl Session {
             .cancel_git_enrichment_task();
 
         if abort_reason.is_none() {
+            if let Some(state_db) = self.services.state_db.clone() {
+                match state_db
+                    .delegation_finalization_for_parent(self.thread_id)
+                    .await
+                {
+                    Ok(codex_state::DelegationFinalization::Blocked) => {
+                        self.send_event(
+                            turn_context.as_ref(),
+                            EventMsg::Warning(WarningEvent {
+                                message: "Durable delegated work remains unresolved after resume; this turn completed with a partial outcome until it is reconciled.".to_string(),
+                            }),
+                        )
+                        .await;
+                    }
+                    Ok(codex_state::DelegationFinalization::Partial) => {
+                        self.send_event(
+                            turn_context.as_ref(),
+                            EventMsg::Warning(WarningEvent {
+                                message: "Durable delegated work failed; this turn completed with a partial outcome.".to_string(),
+                            }),
+                        )
+                        .await;
+                    }
+                    Ok(codex_state::DelegationFinalization::Ready) => {}
+                    Err(err) => {
+                        warn!(%err, "failed to reconstruct durable delegation state");
+                        self.send_event(
+                            turn_context.as_ref(),
+                            EventMsg::Warning(WarningEvent {
+                                message: "Durable delegated work status is unavailable; this turn completed without confirming all obligations.".to_string(),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+            }
             let failed_paths = turn_context
                 .delegation_ledger
                 .wait_for_required_outcome()

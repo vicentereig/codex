@@ -184,6 +184,12 @@ async fn cancellation_requires_request_then_authoritative_confirmation() {
     );
     assert!(
         !runtime
+            .confirm_delegation_cancel("delegation-5", 2, 0, 5)
+            .await
+            .expect("duplicate cancellation confirmation")
+    );
+    assert!(
+        !runtime
             .request_delegation_cancel("delegation-5", 3, 5)
             .await
             .expect("stale cancellation")
@@ -266,5 +272,50 @@ async fn detached_delegation_does_not_block_resumed_parent() {
             .await
             .expect("ready status"),
         crate::DelegationFinalization::Ready
+    );
+}
+
+#[tokio::test]
+async fn missing_child_recovery_never_invents_completion() {
+    let home = super::test_support::unique_temp_dir();
+    let runtime = StateRuntime::init(home, "test-provider".to_string())
+        .await
+        .expect("state runtime");
+    let parent = ThreadId::new();
+    runtime
+        .reserve_delegation("delegation-8", "run-8", parent, "/root/missing", 1)
+        .await
+        .expect("reservation");
+    assert!(
+        runtime
+            .transition_delegation(
+                "delegation-8",
+                0,
+                crate::DurableDelegationStatus::Reserved,
+                crate::DurableDelegationStatus::Retryable,
+                2,
+            )
+            .await
+            .expect("retryable transition")
+    );
+    assert_eq!(
+        runtime
+            .delegation_finalization_for_parent(parent)
+            .await
+            .expect("retryable status"),
+        crate::DelegationFinalization::Blocked
+    );
+    assert!(
+        runtime
+            .reconcile_missing_delegation("delegation-8", 1, 1, 1, 3)
+            .await
+            .expect("missing child reconciliation")
+    );
+    assert_eq!(
+        runtime
+            .delegation_finalization_for_parent(parent)
+            .await
+            .expect("unknown status"),
+        crate::DelegationFinalization::Blocked
     );
 }
