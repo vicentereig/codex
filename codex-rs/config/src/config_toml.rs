@@ -679,7 +679,8 @@ where
 #[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Whether multi-agent tools are enabled. Defaults to true.
-    /// An enabled `features.multi_agent_v2` setting takes precedence.
+    /// An enabled `features.multi_agent_v2` setting takes precedence. Set
+    /// `features.multi_agent_v2 = false` as well to disable multi-agent tools.
     pub enabled: Option<bool>,
     /// Maximum number of spawned agent threads that can be open concurrently per session.
     /// When unset, the selected multi-agent backend uses its default.

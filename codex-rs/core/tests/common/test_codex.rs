@@ -1254,8 +1254,20 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 }
 
 pub fn test_codex() -> TestCodexBuilder {
+    test_codex_builder(/*keep_product_feature_defaults*/ false)
+}
+
+/// Builds the integration harness without neutralizing product-default feature flags.
+///
+/// Most tests should use [`test_codex`] so changes to product defaults do not create
+/// unrelated churn. Tests whose subject is a product default use this constructor.
+pub fn test_codex_with_product_feature_defaults() -> TestCodexBuilder {
+    test_codex_builder(/*keep_product_feature_defaults*/ true)
+}
+
+fn test_codex_builder(keep_product_feature_defaults: bool) -> TestCodexBuilder {
     TestCodexBuilder {
-        config_mutators: vec![Box::new(|config| {
+        config_mutators: vec![Box::new(move |config| {
             config
                 .features
                 .disable(Feature::Apps)
@@ -1265,6 +1277,15 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
+            // This fork defaults new product sessions to V2. Keep generic core
+            // harness tests on the upstream-neutral backend; V2 suites opt in
+            // explicitly after this base mutator.
+            if !keep_product_feature_defaults {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("test config should allow MultiAgentV2 override");
+            }
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],

@@ -2077,15 +2077,16 @@ async fn prepares_resumed_history_before_installing_it() {
 }
 
 #[test]
-fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
+fn resolve_multi_agent_version_handles_new_defaults_and_legacy_history() {
     let thread_id = ThreadId::default();
 
     assert_eq!(
         resolve_multi_agent_version(
             &InitialHistory::New,
-            /*inherited_multi_agent_version*/ None
+            /*inherited_multi_agent_version*/ None,
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
-        None
+        Some(MultiAgentVersion::V2)
     );
     assert_eq!(
         resolve_multi_agent_version(
@@ -2095,6 +2096,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
                 rollout_path: None,
             }),
             /*inherited_multi_agent_version*/ None,
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
         Some(MultiAgentVersion::V1)
     );
@@ -2106,6 +2108,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
                 rollout_path: None,
             }),
             Some(MultiAgentVersion::V2),
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
         Some(MultiAgentVersion::V2)
     );
@@ -2120,6 +2123,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
                 rollout_path: None,
             }),
             Some(MultiAgentVersion::V2),
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
         Some(MultiAgentVersion::Disabled)
     );
@@ -2130,15 +2134,49 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
                 Some(MultiAgentVersion::V2)
             )]),
             Some(MultiAgentVersion::Disabled),
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
         Some(MultiAgentVersion::Disabled)
     );
     assert_eq!(
         resolve_multi_agent_version(
             &InitialHistory::Forked(Vec::new()),
-            /*inherited_multi_agent_version*/ None
+            /*inherited_multi_agent_version*/ None,
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
         ),
         Some(MultiAgentVersion::V1)
+    );
+}
+
+#[test]
+fn resolve_multi_agent_version_preserves_recorded_version_across_resume_and_fork() {
+    let thread_id = ThreadId::default();
+
+    assert_eq!(
+        resolve_multi_agent_version(
+            &InitialHistory::Resumed(ResumedHistory {
+                conversation_id: thread_id,
+                history: Arc::new(vec![session_meta_item(
+                    thread_id,
+                    Some(MultiAgentVersion::V1)
+                )]),
+                rollout_path: None,
+            }),
+            /*inherited_multi_agent_version*/ None,
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
+        ),
+        Some(MultiAgentVersion::V1)
+    );
+    assert_eq!(
+        resolve_multi_agent_version(
+            &InitialHistory::Forked(vec![session_meta_item(
+                thread_id,
+                Some(MultiAgentVersion::Disabled)
+            )]),
+            /*inherited_multi_agent_version*/ None,
+            /*new_session_default*/ Some(MultiAgentVersion::V2),
+        ),
+        Some(MultiAgentVersion::Disabled)
     );
 }
 
@@ -4156,7 +4194,7 @@ fn text_block(s: &str) -> serde_json::Value {
 }
 
 async fn build_test_config(codex_home: &Path) -> Config {
-    ConfigBuilder::without_managed_config_for_tests()
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
         .harness_overrides(ConfigOverrides {
             model: Some("gpt-5.5".to_string()),
@@ -4164,7 +4202,12 @@ async fn build_test_config(codex_home: &Path) -> Config {
         })
         .build()
         .await
-        .expect("load default test config")
+        .expect("load default test config");
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("session test config should allow MultiAgentV2 override");
+    config
 }
 
 fn session_telemetry(
@@ -8252,6 +8295,8 @@ async fn make_multi_agent_v2_usage_hint_test_session(
         |config| {
             if enable_multi_agent_v2 {
                 let _ = config.features.enable(Feature::MultiAgentV2);
+            } else {
+                let _ = config.features.disable(Feature::MultiAgentV2);
             }
             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());

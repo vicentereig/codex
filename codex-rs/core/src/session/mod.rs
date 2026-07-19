@@ -446,6 +446,7 @@ pub(crate) struct SessionSpawnArgs {
 pub(crate) fn resolve_multi_agent_version(
     conversation_history: &InitialHistory,
     inherited_multi_agent_version: Option<MultiAgentVersion>,
+    new_session_default: Option<MultiAgentVersion>,
 ) -> Option<MultiAgentVersion> {
     if inherited_multi_agent_version == Some(MultiAgentVersion::Disabled) {
         return Some(MultiAgentVersion::Disabled);
@@ -455,7 +456,7 @@ pub(crate) fn resolve_multi_agent_version(
         .get_multi_agent_version()
         .or(inherited_multi_agent_version)
         .or(match conversation_history {
-            InitialHistory::New | InitialHistory::Cleared => None,
+            InitialHistory::New | InitialHistory::Cleared => new_session_default,
             // Threads created before runtime metadata existed keep the legacy V1 tool surface.
             InitialHistory::Resumed(_) | InitialHistory::Forked(_) => Some(MultiAgentVersion::V1),
         })
@@ -599,9 +600,11 @@ impl Session {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        let multi_agent_version = resolve_multi_agent_version(
+            &conversation_history,
+            inherited_multi_agent_version,
+            Some(config.multi_agent_version_from_features()),
+        );
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -3103,7 +3106,7 @@ impl Session {
         config: &Config,
     ) -> MultiAgentVersion {
         if let Some(multi_agent_version) = self.multi_agent_version() {
-            return config.multi_agent_version_for_model(Some(multi_agent_version));
+            return multi_agent_version;
         }
 
         let selected = config.multi_agent_version_for_model(model_info.multi_agent_version);

@@ -1049,8 +1049,10 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        // This fork makes V2 the supported default backend. Keep an explicit
+        // feature flag so users can select the legacy V1 compatibility path.
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::MultiAgentMode,

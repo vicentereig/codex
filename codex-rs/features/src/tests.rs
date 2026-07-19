@@ -55,6 +55,13 @@ fn default_enabled_features_are_stable() {
 }
 
 #[test]
+fn multi_agent_v2_is_a_stable_default_in_this_fork() {
+    assert_eq!(Feature::MultiAgentV2.stage(), Stage::Stable);
+    assert!(Feature::MultiAgentV2.default_enabled());
+    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
+}
+
+#[test]
 fn removed_apps_mcp_path_override_shapes_are_ignored() {
     let features = [
         toml::from_str::<FeaturesToml>("apps_mcp_path_override = true")
@@ -531,7 +538,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
 }
 
 #[test]
-fn unstable_warning_event_mentions_enabled_structured_under_development_feature() {
+fn unstable_warning_event_omits_stable_structured_features() {
     let configured_features: Table = toml::from_str(
         r#"
 multi_agent_v2 = { enabled = true, tool_namespace = "agents" }
@@ -556,7 +563,7 @@ code_mode = true
         panic!("expected warning event");
     };
     assert_eq!(
-        "Under-development features enabled: code_mode, multi_agent_v2. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
+        "Under-development features enabled: code_mode. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /tmp/config.toml.".to_string(),
         message
     );
 }

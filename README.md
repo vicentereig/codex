@@ -6,19 +6,46 @@ For the product overview and official docs, see [OpenAI's Codex README](CODEX_RE
 
 ## Configure it
 
-Add these settings to `~/.codex/config.toml`:
+`multi_agent_v2` is stable and enabled by default in this fork. Add settings
+only to customize its behavior:
 
 ```toml
 model = "gpt-5.6-luna"
 model_reasoning_effort = "medium"
 
 [features.multi_agent_v2]
-enabled = true
 expose_spawn_agent_model_overrides = true
 max_concurrent_threads_per_session = 4
 ```
 
 The thread cap includes the root agent, so `4` leaves three slots for children. `expose_spawn_agent_model_overrides` adds `model` and `reasoning_effort` to `spawn_agent`.
+
+### Select a backend or disable agents
+
+For new sessions, this fork selects V2 unless you explicitly opt out:
+
+| Configuration | New-session backend |
+| --- | --- |
+| Omit both settings, or enable `features.multi_agent_v2` | V2 |
+| `features.multi_agent_v2 = false` | V1 compatibility backend |
+| `features.multi_agent_v2 = false` and `agents.enabled = false` | Agents disabled |
+
+`features.multi_agent_v2` is authoritative: `[agents] enabled = false` alone
+does not override V2. Either TOML form below opts a new session out of V2:
+
+```toml
+[features]
+multi_agent_v2 = false
+```
+
+```toml
+[features.multi_agent_v2]
+enabled = false
+```
+
+Resumed and forked sessions preserve their recorded V1, V2, or disabled
+backend so changing the default cannot rewrite an existing thread's tool
+surface.
 
 Restart Codex, then enter `/debug-config` in the TUI to inspect the loaded settings.
 

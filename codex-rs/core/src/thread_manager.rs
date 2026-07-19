@@ -1230,9 +1230,6 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
-            return multi_agent_version;
-        }
         self.initial_multi_agent_version_for_spawn(
             initial_history,
             session_source,
@@ -1268,7 +1265,11 @@ impl ThreadManagerState {
                 .and_then(|thread| thread.multi_agent_version()),
             None => None,
         };
-        resolve_multi_agent_version(initial_history, inherited_multi_agent_version)
+        resolve_multi_agent_version(
+            initial_history,
+            inherited_multi_agent_version,
+            /*new_session_default*/ None,
+        )
     }
 
     /// Resolves the provider snapshot for a newly spawned runtime.

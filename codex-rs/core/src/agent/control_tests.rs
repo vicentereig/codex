@@ -81,7 +81,11 @@ async fn test_config_with_cli_overrides(
 }
 
 async fn test_config() -> (TempDir, Config) {
-    test_config_with_cli_overrides(Vec::new()).await
+    test_config_with_cli_overrides(vec![(
+        "features.multi_agent_v2".to_string(),
+        TomlValue::Boolean(false),
+    )])
+    .await
 }
 
 fn text_input(text: &str) -> Vec<UserInput> {

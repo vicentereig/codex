@@ -27,6 +27,7 @@ use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex_with_product_feature_defaults;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -166,6 +167,58 @@ async fn response_body_for_remote_model(
     Ok(response_for_remote_model(remote_model, configure)
         .await?
         .body)
+}
+
+async fn response_body_for_product_defaults(
+    configure: impl FnOnce(&mut Config) + Send + 'static,
+) -> Result<(Value, Option<MultiAgentVersion>)> {
+    let server = responses::start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-default-1"),
+            ev_assistant_message("msg-default-1", "done"),
+            ev_completed("resp-default-1"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex_with_product_feature_defaults().with_config(configure);
+    let test = builder.build_with_auto_env(&server).await?;
+
+    test.submit_turn("list tools").await?;
+
+    Ok((
+        response_mock.single_request().body_json(),
+        test.codex.multi_agent_version(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn product_default_exposes_v2_and_explicit_opt_out_selects_v1() -> Result<()> {
+    let (default_body, default_version) = response_body_for_product_defaults(|_| {}).await?;
+    let (opt_out_body, opt_out_version) = response_body_for_product_defaults(|config| {
+        // The integration builder constructs `Config` directly; mirror the TOML loader's
+        // agent defaults before exercising the feature opt-out.
+        config.agents_enabled = true;
+        config.agent_max_depth = 4;
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should allow MultiAgentV2 override");
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow Collab override");
+    })
+    .await?;
+
+    assert_eq!(default_version, Some(MultiAgentVersion::V2));
+    assert_eq!(opt_out_version, Some(MultiAgentVersion::V1));
+    assert!(tool_names(&default_body).contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
+    let opt_out_tools = tool_names(&opt_out_body);
+    assert!(!opt_out_tools.contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -49,7 +49,7 @@
           "description": "Default reasoning effort for spawned subagents when the spawn call does not select one."
         },
         "enabled": {
-          "description": "Whether multi-agent tools are enabled. Defaults to true. An enabled `features.multi_agent_v2` setting takes precedence.",
+          "description": "Whether multi-agent tools are enabled. Defaults to true. An enabled `features.multi_agent_v2` setting takes precedence. Set `features.multi_agent_v2 = false` as well to disable multi-agent tools.",
           "type": "boolean"
         },
         "interrupt_message": {
