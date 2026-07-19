@@ -144,3 +144,48 @@ async fn delivery_intent_and_receipt_are_versioned_and_idempotent() {
             .expect("receipt")
     );
 }
+
+#[test]
+fn delegation_retry_backoff_is_bounded() {
+    assert_eq!(StateRuntime::delegation_retry_delay_ms(0), 100);
+    assert_eq!(StateRuntime::delegation_retry_delay_ms(9), 51_200);
+    assert_eq!(StateRuntime::delegation_retry_delay_ms(10), 60_000);
+    assert_eq!(StateRuntime::delegation_retry_delay_ms(-1), 100);
+}
+
+#[tokio::test]
+async fn cancellation_requires_request_then_authoritative_confirmation() {
+    let home = super::test_support::unique_temp_dir();
+    let runtime = StateRuntime::init(home, "test-provider".to_string())
+        .await
+        .expect("state runtime");
+    let child = ThreadId::new();
+    runtime
+        .reserve_delegation("delegation-5", "run-5", ThreadId::new(), "/root/worker", 1)
+        .await
+        .expect("reservation");
+    assert!(
+        runtime
+            .bind_delegation("delegation-5", child, 0, 2)
+            .await
+            .expect("bind")
+    );
+    assert!(
+        runtime
+            .request_delegation_cancel("delegation-5", 1, 3)
+            .await
+            .expect("cancel request")
+    );
+    assert!(
+        runtime
+            .confirm_delegation_cancel("delegation-5", 2, 0, 4)
+            .await
+            .expect("cancel confirmation")
+    );
+    assert!(
+        !runtime
+            .request_delegation_cancel("delegation-5", 3, 5)
+            .await
+            .expect("stale cancellation")
+    );
+}

@@ -5,6 +5,135 @@ use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
 impl StateRuntime {
+    /// Bounded exponential retry delay for a delegation attempt.
+    pub fn delegation_retry_delay_ms(attempt: i64) -> i64 {
+        let exponent = attempt.clamp(0, 9) as u32;
+        100_i64.saturating_mul(1_i64 << exponent).min(60_000)
+    }
+
+    /// Claim one pending outbox delivery. Version and lease epoch jointly fence stale workers.
+    pub async fn claim_delegation_delivery(
+        &self,
+        delivery_id: &str,
+        expected_version: i64,
+        expected_lease_epoch: i64,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegation_delivery_outbox SET status = 'sent', version = version + 1, lease_epoch = lease_epoch + 1, retry_after_ms = ?, updated_at_ms = ? WHERE delivery_id = ? AND version = ? AND lease_epoch = ? AND status = 'pending' AND retry_after_ms <= ?",
+        )
+        .bind(now_ms.saturating_add(lease_ms.max(0)))
+        .bind(now_ms)
+        .bind(delivery_id)
+        .bind(expected_version)
+        .bind(expected_lease_epoch)
+        .bind(now_ms)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Return a leased delivery to pending with bounded backoff, or leave it sent when exhausted.
+    pub async fn schedule_delegation_retry(
+        &self,
+        delivery_id: &str,
+        expected_version: i64,
+        expected_lease_epoch: i64,
+        attempt: i64,
+        max_attempts: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        if attempt >= max_attempts.max(1) {
+            return Ok(false);
+        }
+        let retry_after = now_ms.saturating_add(Self::delegation_retry_delay_ms(attempt));
+        let result = sqlx::query(
+            "UPDATE delegation_delivery_outbox SET status = 'pending', version = version + 1, retry_after_ms = ?, updated_at_ms = ? WHERE delivery_id = ? AND version = ? AND lease_epoch = ? AND status = 'sent'",
+        )
+        .bind(retry_after)
+        .bind(now_ms)
+        .bind(delivery_id)
+        .bind(expected_version)
+        .bind(expected_lease_epoch)
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Request cancellation without claiming that the child has stopped.
+    pub async fn request_delegation_cancel(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status IN (?, ?)",
+        )
+        .bind(crate::DurableDelegationStatus::CancelRequested.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(crate::DurableDelegationStatus::Bound.as_ref())
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Commit cancellation only after the authoritative owner observes the child stopped.
+    pub async fn confirm_delegation_cancel(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        expected_lease_epoch: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND lease_epoch = ? AND status = ?",
+        )
+        .bind(crate::DurableDelegationStatus::Cancelled.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(expected_lease_epoch)
+        .bind(crate::DurableDelegationStatus::CancelRequested.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Reconcile a child missing from the live registry. Exhausted attempts become Unknown so
+    /// restart logic cannot infer success; otherwise the record is retryable after backoff.
+    pub async fn reconcile_missing_delegation(
+        &self,
+        delegation_id: &str,
+        expected_version: i64,
+        attempt: i64,
+        max_attempts: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        let next_status = if attempt >= max_attempts.max(1) {
+            crate::DurableDelegationStatus::Unknown
+        } else {
+            crate::DurableDelegationStatus::Retryable
+        };
+        let result = sqlx::query(
+            "UPDATE delegations SET status = ?, version = version + 1, updated_at_ms = ? WHERE delegation_id = ? AND version = ? AND status IN (?, ?, ?)",
+        )
+        .bind(next_status.as_ref())
+        .bind(now_ms)
+        .bind(delegation_id)
+        .bind(expected_version)
+        .bind(crate::DurableDelegationStatus::Bound.as_ref())
+        .bind(crate::DurableDelegationStatus::Running.as_ref())
+        .bind(crate::DurableDelegationStatus::Retryable.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Reserve a durable delegation before creating its child runtime.
     pub async fn reserve_delegation(
         &self,
