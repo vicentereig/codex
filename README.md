@@ -1,12 +1,12 @@
-# Codex-flo: Luna-aware Codex
+# Vicente's Codex
 
-Codex-flo is a Luna-aware fork for dependable, inspectable agent swarms. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
+Vicente's Codex is a Luna-aware fork for dependable, inspectable agent swarms. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
 
 ## What this fork covers
 
 Two Beads epics shape the fork:
 
-- **Durable delegation (`codex-flo`)** — targetable waits, turn-scoped join/cancel/detach, durable run identities, bounded retries, restart reconciliation, and explicit partial or unknown outcomes.
+- **Durable delegation** — targetable waits, turn-scoped join/cancel/detach, durable run identities, bounded retries, restart reconciliation, and explicit partial or unknown outcomes.
 - **Agent observability (`codex-90w`)** — research and design for truthful nested-agent navigation, plans, lifecycle status, model and effort visibility, usage, and cost. These notes guide the next TUI work; they do not claim features the current UI does not yet expose.
 
 ## Use this fork
@@ -14,8 +14,8 @@ Two Beads epics shape the fork:
 Clone the fork, build it, and put it first on your `PATH`:
 
 ```sh
-git clone <your-fork-url> codex-flo
-cd codex-flo/codex-rs
+git clone <your-fork-url> vicentes-codex
+cd vicentes-codex/codex-rs
 cargo build --release -p codex-cli
 mkdir -p "$HOME/.local/bin"
 install -m 0755 target/release/codex "$HOME/.local/bin/codex"
