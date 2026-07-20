@@ -6,6 +6,11 @@ mod aggregate_queries;
 mod aggregates;
 mod authority;
 mod authority_marker;
+mod command_event;
+mod command_identity;
+mod command_leases;
+mod command_rows;
+mod commands;
 mod reserve_transition;
 mod terminal_facts;
 mod terminal_transition;
@@ -44,3 +49,18 @@ mod aggregate_transition_tests;
 #[cfg(test)]
 #[path = "authority_tests.rs"]
 mod authority_tests;
+#[cfg(test)]
+#[path = "command_atomicity_tests.rs"]
+mod command_atomicity_tests;
+#[cfg(test)]
+#[path = "command_fencing_tests.rs"]
+mod command_fencing_tests;
+#[cfg(test)]
+#[path = "command_lease_tests.rs"]
+mod command_lease_tests;
+#[cfg(test)]
+#[path = "command_payload_tests.rs"]
+mod command_payload_tests;
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod commands_tests;

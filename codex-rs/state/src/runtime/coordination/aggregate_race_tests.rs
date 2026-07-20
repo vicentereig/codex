@@ -110,10 +110,7 @@ pub(super) fn terminal_for_generation_one(
             target: target(1),
             target_turn_id: turn("turn-b"),
             outcome: TurnOutcome::Succeeded,
-            included_generations: BoundedList::new(
-                vec![generation(1)],
-                /*omitted_count*/ 0,
-            )?,
+            included_generations: BoundedList::new(vec![generation(1)], /*omitted_count*/ 0)?,
         },
         expected_owner_thread_id: thread(ROOT),
         expected_owner_turn_id: turn("turn-a"),

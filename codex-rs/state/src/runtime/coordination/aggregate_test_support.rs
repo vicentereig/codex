@@ -60,15 +60,13 @@ pub(super) fn reserve_params() -> ReserveAssignment {
             source: CoordinationSource::Native {
                 schema_version: codex_coordination::CoordinationSchemaVersion::current(),
                 sanitizer_version: codex_coordination::SanitizerVersion::current(),
-                suppression_keys: BoundedList::new(Vec::new(), /*omitted_count*/ 0)
-                    .expect("keys"),
+                suppression_keys: BoundedList::new(Vec::new(), /*omitted_count*/ 0).expect("keys"),
             },
             primary: NativeEventIdentity {
                 event_id: CoordinationEventId::parse(EVENT).expect("event"),
                 operation_id,
             },
-            secondary: BoundedList::new(Vec::new(), /*omitted_count*/ 0)
-                .expect("secondary"),
+            secondary: BoundedList::new(Vec::new(), /*omitted_count*/ 0).expect("secondary"),
         },
         assignment_id: AssignmentId::parse(ASSIGNMENT).expect("assignment"),
         child_thread_id: thread(CHILD),
@@ -145,8 +143,7 @@ pub(super) fn context(
         source: CoordinationSource::Native {
             schema_version: codex_coordination::CoordinationSchemaVersion::current(),
             sanitizer_version: codex_coordination::SanitizerVersion::current(),
-            suppression_keys: BoundedList::new(Vec::new(), /*omitted_count*/ 0)
-                .expect("keys"),
+            suppression_keys: BoundedList::new(Vec::new(), /*omitted_count*/ 0).expect("keys"),
         },
         primary: identity(event_id, operation_id),
         secondary: BoundedList::new(
