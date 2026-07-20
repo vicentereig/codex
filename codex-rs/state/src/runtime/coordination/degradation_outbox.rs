@@ -1,6 +1,9 @@
 use sqlx::Row;
 use sqlx::SqlitePool;
 
+use super::recovery::NoRecoveryFailure;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_recovery::DegradationId;
@@ -16,13 +19,22 @@ pub(crate) async fn claim_degradation_publications(
     pool: &SqlitePool,
     params: &ClaimDegradationPublications,
 ) -> Result<ClaimDegradationPublicationsOutcome, RecoveryWriteError> {
+    claim_degradation_publications_with(pool, params, &NoRecoveryFailure).await
+}
+
+pub(super) async fn claim_degradation_publications_with(
+    pool: &SqlitePool,
+    params: &ClaimDegradationPublications,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<ClaimDegradationPublicationsOutcome, RecoveryWriteError> {
     params.validate()?;
-    let mut connection = recovery_guard::begin(pool).await?;
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = async {
-        recovery_guard::active_authority(
+        recovery_guard::active_authority_with(
             &mut connection,
             &params.root_thread_id,
             Some(params.expected_state_epoch),
+            injector,
         )
         .await?;
         let rows = sqlx::query(
@@ -42,6 +54,9 @@ pub(crate) async fn claim_degradation_publications(
         .fetch_all(&mut *connection)
         .await
         .map_err(internal)?;
+        injector
+            .after_recovery_step(RecoveryStep::PublicationRead)
+            .map_err(RecoveryWriteError::Internal)?;
         let mut claimed = Vec::with_capacity(rows.len());
         for row in rows {
             let degradation_id = DegradationId::parse(&row.get::<String, _>("degradation_id"))?;
@@ -69,6 +84,9 @@ pub(crate) async fn claim_degradation_publications(
             if updated.rows_affected() != 1 {
                 return Err(RecoveryWriteError::Deferred);
             }
+            injector
+                .after_recovery_step(RecoveryStep::PublicationUpdate)
+                .map_err(RecoveryWriteError::Internal)?;
             claimed.push(DegradationPublicationLease {
                 degradation_id,
                 root_thread_id: params.root_thread_id,
@@ -83,7 +101,7 @@ pub(crate) async fn claim_degradation_publications(
         Ok(ClaimDegradationPublicationsOutcome::Claimed(claimed))
     }
     .await;
-    match recovery_guard::finish(&mut connection, result).await {
+    match recovery_guard::finish_with(&mut connection, result, injector).await {
         Err(RecoveryWriteError::Deferred) => Ok(ClaimDegradationPublicationsOutcome::Deferred),
         result => result,
     }
@@ -93,13 +111,22 @@ pub(crate) async fn resolve_degradation_publication(
     pool: &SqlitePool,
     params: &ResolveDegradationPublication,
 ) -> Result<ResolveDegradationPublicationOutcome, RecoveryWriteError> {
+    resolve_degradation_publication_with(pool, params, &NoRecoveryFailure).await
+}
+
+pub(super) async fn resolve_degradation_publication_with(
+    pool: &SqlitePool,
+    params: &ResolveDegradationPublication,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<ResolveDegradationPublicationOutcome, RecoveryWriteError> {
     params.validate()?;
-    let mut connection = recovery_guard::begin(pool).await?;
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = async {
-        recovery_guard::active_authority(
+        recovery_guard::active_authority_with(
             &mut connection,
             &params.lease.root_thread_id,
             Some(params.expected_state_epoch),
+            injector,
         )
         .await?;
         let row = sqlx::query(
@@ -112,6 +139,9 @@ pub(crate) async fn resolve_degradation_publication(
         .await
         .map_err(internal)?
         .ok_or(RecoveryWriteError::CorruptState)?;
+        injector
+            .after_recovery_step(RecoveryStep::PublicationRead)
+            .map_err(RecoveryWriteError::Internal)?;
         let current_status = status(&row.get::<String, _>("status"))?;
         if row.get::<String, _>("root_thread_id") != params.lease.root_thread_id.to_string()
             || unsigned(row.get("after_revision"))? != params.lease.after_revision
@@ -199,12 +229,15 @@ pub(crate) async fn resolve_degradation_publication(
         if updated.rows_affected() != 1 {
             return Ok(ResolveDegradationPublicationOutcome::Fenced);
         }
+        injector
+            .after_recovery_step(RecoveryStep::PublicationUpdate)
+            .map_err(RecoveryWriteError::Internal)?;
         Ok(ResolveDegradationPublicationOutcome::Applied(status(
             next_status,
         )?))
     }
     .await;
-    recovery_guard::finish(&mut connection, result).await
+    recovery_guard::finish_with(&mut connection, result, injector).await
 }
 
 fn status(value: &str) -> Result<DegradationPublicationStatus, RecoveryWriteError> {

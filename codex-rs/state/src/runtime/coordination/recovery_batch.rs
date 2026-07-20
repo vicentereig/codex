@@ -1,13 +1,19 @@
 use sqlx::SqlitePool;
 
+use super::aggregate_journal::AggregateFailureInjector;
+use super::aggregate_journal::AggregateStep;
 use super::assignment_recovery;
 use super::command_recovery;
+use super::inbox::InboxFailureInjector;
+use super::inbox::InboxStep;
 use super::inbox::InboxWriteError;
-use super::inbox::NoInboxFailure;
 use super::inbox_maintenance;
 use super::inbox_recovery;
+use super::recovery::NoRecoveryFailure;
 use super::recovery::RecoveryBatch;
 use super::recovery::RecoveryDisposition;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_inbox::InboxMaintenanceBatch;
@@ -17,6 +23,15 @@ pub(crate) async fn recover_coordination_batch(
     pool: &SqlitePool,
     now_ms: i64,
     limit: u32,
+) -> Result<RecoveryBatch, RecoveryWriteError> {
+    recover_coordination_batch_with(pool, now_ms, limit, &NoRecoveryFailure).await
+}
+
+pub(super) async fn recover_coordination_batch_with(
+    pool: &SqlitePool,
+    now_ms: i64,
+    limit: u32,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<RecoveryBatch, RecoveryWriteError> {
     if now_ms < 0 {
         return Err(
@@ -28,9 +43,9 @@ pub(crate) async fn recover_coordination_batch(
             crate::model::coordination_recovery::RecoveryInputError::InvalidBatchLimit.into(),
         );
     }
-    let mut connection = recovery_guard::begin(pool).await?;
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = async {
-        let state_epoch = recovery_guard::active_epoch(&mut connection).await?;
+        let state_epoch = recovery_guard::active_epoch_with(&mut connection, injector).await?;
         let mut dispositions = Vec::with_capacity(limit as usize);
 
         let poisoned = command_recovery::poison_uncertain_attempts(
@@ -38,6 +53,7 @@ pub(crate) async fn recover_coordination_batch(
             state_epoch,
             now_ms,
             remaining(limit, dispositions.len()),
+            injector,
         )
         .await?;
         extend(
@@ -51,6 +67,7 @@ pub(crate) async fn recover_coordination_batch(
                 state_epoch,
                 now_ms,
                 remaining(limit, dispositions.len()),
+                injector,
             )
             .await?;
             extend(
@@ -65,6 +82,7 @@ pub(crate) async fn recover_coordination_batch(
                 state_epoch,
                 now_ms,
                 remaining(limit, dispositions.len()),
+                injector,
             )
             .await?;
             extend(
@@ -78,6 +96,7 @@ pub(crate) async fn recover_coordination_batch(
                 &mut connection,
                 now_ms,
                 remaining(limit, dispositions.len()),
+                injector,
             )
             .await?;
             extend(
@@ -87,13 +106,14 @@ pub(crate) async fn recover_coordination_batch(
             );
         }
         if dispositions.len() < limit as usize {
+            let inbox_injector = RecoveryInboxFailure(injector);
             let expired = inbox_maintenance::expire_payloads(
                 &mut connection,
                 InboxMaintenanceBatch {
                     now_ms,
                     limit: remaining(limit, dispositions.len()),
                 },
-                &NoInboxFailure,
+                &inbox_injector,
             )
             .await
             .map_err(inbox_error)?;
@@ -102,6 +122,7 @@ pub(crate) async fn recover_coordination_batch(
                 state_epoch,
                 &expired.changed_receipts,
                 now_ms,
+                injector,
             )
             .await?;
             extend(
@@ -111,13 +132,14 @@ pub(crate) async fn recover_coordination_batch(
             );
         }
         if dispositions.len() < limit as usize {
+            let inbox_injector = RecoveryInboxFailure(injector);
             let reclaimed = inbox_maintenance::reclaim_leases(
                 &mut connection,
                 InboxMaintenanceBatch {
                     now_ms,
                     limit: remaining(limit, dispositions.len()),
                 },
-                &NoInboxFailure,
+                &inbox_injector,
             )
             .await
             .map_err(inbox_error)?;
@@ -130,11 +152,42 @@ pub(crate) async fn recover_coordination_batch(
         Ok(RecoveryBatch { dispositions })
     }
     .await;
-    recovery_guard::finish(&mut connection, result).await
+    recovery_guard::finish_with(&mut connection, result, injector).await
 }
 
 fn remaining(limit: u32, completed: usize) -> u32 {
     limit - completed as u32
+}
+
+struct RecoveryInboxFailure<'a>(&'a dyn RecoveryFailureInjector);
+
+impl AggregateFailureInjector for RecoveryInboxFailure<'_> {
+    fn after_step(&self, step: AggregateStep) -> anyhow::Result<()> {
+        if step == AggregateStep::AuthorityRead {
+            self.0.after_recovery_step(RecoveryStep::AuthorityRead)?;
+        }
+        Ok(())
+    }
+}
+
+impl InboxFailureInjector for RecoveryInboxFailure<'_> {
+    fn after_inbox_step(&self, step: InboxStep) -> anyhow::Result<()> {
+        let step = match step {
+            InboxStep::MaintenanceRead => RecoveryStep::RecoveryRead,
+            InboxStep::SelectionUpdate | InboxStep::MaintenanceUpdate => {
+                RecoveryStep::RecoveryUpdate
+            }
+            InboxStep::DuplicateRead
+            | InboxStep::CommandRead
+            | InboxStep::TargetFence
+            | InboxStep::ReceiptEvent
+            | InboxStep::ReceiptInsert
+            | InboxStep::ClaimUpdate
+            | InboxStep::SelectionInsert
+            | InboxStep::InboxUpdate => return Ok(()),
+        };
+        self.0.after_recovery_step(step)
+    }
 }
 
 fn extend(

@@ -12,6 +12,7 @@ use super::degradation::record_exogenous_terminal_degradation_with;
 use super::failure_injection_support::*;
 use super::inbox_test_support::*;
 use super::recovery::RecoveryStep;
+use super::recovery::RecoveryWriteError;
 use super::recovery_test_support::CHILD;
 use super::recovery_test_support::compatibility_event;
 use crate::StateRuntime;
@@ -232,10 +233,17 @@ async fn degradation_trace_reopens_atomically_and_replays_one_pair() -> anyhow::
         RecordExogenousTerminalOutcome::Applied(_)
     ));
     let trace = recorder.trace();
-    assert_eq!(trace.len(), 4);
+    assert_eq!(trace.len(), 11);
     assert_eq!(
         trace.iter().map(|point| point.boundary).collect::<Vec<_>>(),
         vec![
+            Boundary::Recovery(RecoveryStep::TransactionBegin),
+            Boundary::Recovery(RecoveryStep::MarkerRead),
+            Boundary::Recovery(RecoveryStep::MarkerRead),
+            Boundary::Recovery(RecoveryStep::AuthorityRead),
+            Boundary::Recovery(RecoveryStep::AuthorityRead),
+            Boundary::Recovery(RecoveryStep::AnchorRead),
+            Boundary::Recovery(RecoveryStep::LegacyRead),
             Boundary::Recovery(RecoveryStep::DegradationInsert),
             Boundary::Recovery(RecoveryStep::DegradationOutboxInsert),
             Boundary::Recovery(RecoveryStep::BeforeCommit),
@@ -281,6 +289,58 @@ async fn degradation_trace_reopens_atomically_and_replays_one_pair() -> anyhow::
             assert_eq!(frozen_state(&reopened).await?, committed);
         }
         assert_integrity(&reopened).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn committed_marker_quarantine_never_traces_rollback() -> anyhow::Result<()> {
+    let expected = vec![
+        Boundary::Recovery(RecoveryStep::TransactionBegin),
+        Boundary::Recovery(RecoveryStep::MarkerRead),
+        Boundary::Recovery(RecoveryStep::MarkerRead),
+        Boundary::Recovery(RecoveryStep::MarkerUpdate),
+        Boundary::Recovery(RecoveryStep::MarkerCommit),
+    ];
+    for fail_after_commit in [false, true] {
+        let home = unique_temp_dir();
+        let (runtime, epoch) = runtime_with_root_at(home.clone()).await?;
+        tokio::fs::remove_file(home.join(super::authority_marker::MARKER_FILE_NAME)).await?;
+        let injector = if fail_after_commit {
+            CrashInjector::fail_at(
+                CrashPoint {
+                    boundary: Boundary::Recovery(RecoveryStep::MarkerCommit),
+                    occurrence: 1,
+                },
+                NOW_MS,
+            )
+        } else {
+            CrashInjector::recording(NOW_MS)
+        };
+        let result = record_exogenous_terminal_degradation_with(
+            &runtime.pool,
+            observation(epoch)?,
+            &injector,
+        )
+        .await;
+        if fail_after_commit {
+            assert!(matches!(result, Err(RecoveryWriteError::Internal(_))));
+        } else {
+            assert!(matches!(result, Err(RecoveryWriteError::Quarantined)));
+        }
+        assert_eq!(
+            injector
+                .trace()
+                .into_iter()
+                .map(|point| point.boundary)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM coordination_authority WHERE singleton_id=1")
+                .fetch_one(&*runtime.pool)
+                .await?;
+        assert_eq!(status, "quarantined");
     }
     Ok(())
 }

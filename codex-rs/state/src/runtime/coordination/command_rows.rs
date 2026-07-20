@@ -300,6 +300,9 @@ pub(super) async fn finish_command<T>(
         Ok(value) => {
             if let Err(error) = injector.after_step(AggregateStep::BeforeCommit) {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                injector
+                    .after_command_step(super::commands::CommandStep::Rollback)
+                    .map_err(internal)?;
                 return Err(internal(error));
             }
             sqlx::query("COMMIT")
@@ -313,6 +316,9 @@ pub(super) async fn finish_command<T>(
         }
         Err(error) => {
             let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            injector
+                .after_command_step(super::commands::CommandStep::Rollback)
+                .map_err(internal)?;
             Err(error)
         }
     }

@@ -19,6 +19,9 @@ pub(super) async fn reclaim_leases(
     authority(connection, injector).await?;
     let rows = sqlx::query("SELECT receipt_id,lifecycle,expires_at_ms FROM coordination_inbox WHERE lifecycle IN ('leased','selected') AND lease_expires_at_ms<=? ORDER BY lease_expires_at_ms,receipt_id LIMIT ?")
         .bind(params.now_ms).bind(i64::from(params.limit)).fetch_all(&mut *connection).await.map_err(internal)?;
+    injector
+        .after_inbox_step(InboxStep::MaintenanceRead)
+        .map_err(internal)?;
     let mut changed_receipts = Vec::with_capacity(rows.len());
     for row in rows {
         let receipt = ReceiptId::parse(&row.get::<String, _>("receipt_id"))
@@ -67,6 +70,9 @@ pub(super) async fn expire_payloads(
     authority(connection, injector).await?;
     let rows = sqlx::query("SELECT receipt_id,lifecycle FROM coordination_inbox WHERE ciphertext IS NOT NULL AND expires_at_ms<=? ORDER BY expires_at_ms,receipt_id LIMIT ?")
         .bind(params.now_ms).bind(i64::from(params.limit)).fetch_all(&mut *connection).await.map_err(internal)?;
+    injector
+        .after_inbox_step(InboxStep::MaintenanceRead)
+        .map_err(internal)?;
     let mut changed_receipts = Vec::with_capacity(rows.len());
     for row in rows {
         let receipt = ReceiptId::parse(&row.get::<String, _>("receipt_id"))

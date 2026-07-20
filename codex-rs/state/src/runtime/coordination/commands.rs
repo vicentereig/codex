@@ -71,9 +71,17 @@ impl From<CoordinationWriteError> for CommandWriteError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandStep {
+    TransactionBegin,
+    Rollback,
     IdentityRead,
     TargetCapture,
     CommandInsert,
+    LeaseRead,
+    ClaimUpdate,
+    AttemptUpdate,
+    ResolutionUpdate,
+    ReclaimUpdate,
+    PayloadPurgeUpdate,
 }
 
 /// Injects deterministic failures at command-specific SQL boundaries.
@@ -84,7 +92,7 @@ pub(crate) trait CommandFailureInjector: AggregateFailureInjector {
     fn after_command_step(&self, step: CommandStep) -> anyhow::Result<()>;
 }
 
-struct NoCommandFailure;
+pub(super) struct NoCommandFailure;
 
 impl AggregateFailureInjector for NoCommandFailure {
     fn after_step(&self, _step: AggregateStep) -> anyhow::Result<()> {

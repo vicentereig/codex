@@ -5,10 +5,13 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 
-use super::legacy_degradations::record_legacy_degradation_in;
+use super::legacy_degradations::record_legacy_degradation_in_with;
 use super::legacy_degradations::validate_existing_legacy_degradation_in;
-use super::legacy_links::record_legacy_link_in;
+use super::legacy_links::record_legacy_link_in_with;
 use super::legacy_links::validate_existing_legacy_link_in;
+use super::recovery::NoRecoveryFailure;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_recovery_state::AdvanceLegacyScanOutcome;
@@ -19,24 +22,37 @@ pub(crate) async fn advance_legacy_scan_checkpoint(
     pool: &SqlitePool,
     page: &LegacyScanPage,
 ) -> Result<AdvanceLegacyScanOutcome, RecoveryWriteError> {
+    advance_legacy_scan_checkpoint_with(pool, page, &NoRecoveryFailure).await
+}
+
+pub(super) async fn advance_legacy_scan_checkpoint_with(
+    pool: &SqlitePool,
+    page: &LegacyScanPage,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<AdvanceLegacyScanOutcome, RecoveryWriteError> {
     page.validate()?;
-    let mut connection = recovery_guard::begin(pool).await?;
-    let result = advance_in(&mut connection, page).await;
-    recovery_guard::finish(&mut connection, result).await
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
+    let result = advance_in(&mut connection, page, injector).await;
+    recovery_guard::finish_with(&mut connection, result, injector).await
 }
 
 async fn advance_in(
     connection: &mut SqliteConnection,
     page: &LegacyScanPage,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<AdvanceLegacyScanOutcome, RecoveryWriteError> {
-    recovery_guard::active_authority(
+    recovery_guard::active_authority_with(
         connection,
         &page.root_thread_id,
         Some(page.expected_state_epoch),
+        injector,
     )
     .await?;
     let existing =
         load_checkpoint(connection, &page.root_thread_id, &page.source_thread_id).await?;
+    injector
+        .after_recovery_step(RecoveryStep::CheckpointRead)
+        .map_err(RecoveryWriteError::Internal)?;
     let expected_last_order = page
         .links
         .iter()
@@ -51,9 +67,12 @@ async fn advance_in(
         if exact_target(existing, page) {
             for link in &page.links {
                 validate_existing_legacy_link_in(connection, link).await?;
+                injector
+                    .after_recovery_step(RecoveryStep::LegacyRead)
+                    .map_err(RecoveryWriteError::Internal)?;
             }
             for degradation in &page.degradations {
-                validate_existing_legacy_degradation_in(connection, degradation).await?;
+                validate_existing_legacy_degradation_in(connection, degradation, injector).await?;
             }
             return Ok(AdvanceLegacyScanOutcome::Duplicate(existing.clone()));
         }
@@ -67,7 +86,7 @@ async fn advance_in(
                 && page.scanned_prefix_fingerprint != existing.scanned_prefix_fingerprint)
             || (existing.complete && !page.complete)
         {
-            record_source_changed_degradations(connection, page).await?;
+            record_source_changed_degradations(connection, page, injector).await?;
             return Ok(AdvanceLegacyScanOutcome::SourceChanged(existing.clone()));
         }
     } else {
@@ -82,10 +101,10 @@ async fn advance_in(
         }
     }
     for link in &page.links {
-        record_legacy_link_in(connection, link).await?;
+        record_legacy_link_in_with(connection, link, injector).await?;
     }
     for degradation in &page.degradations {
-        record_legacy_degradation_in(connection, degradation, page.now_ms).await?;
+        record_legacy_degradation_in_with(connection, degradation, page.now_ms, injector).await?;
     }
     let next_version = existing.as_ref().map_or(Ok(0), |checkpoint| {
         checkpoint
@@ -127,6 +146,9 @@ async fn advance_in(
             if updated.rows_affected() != 1 {
                 return Err(RecoveryWriteError::Deferred);
             }
+            injector
+                .after_recovery_step(RecoveryStep::CheckpointUpdate)
+                .map_err(RecoveryWriteError::Internal)?;
         }
         None => {
             sqlx::query(
@@ -148,6 +170,9 @@ async fn advance_in(
             .execute(&mut *connection)
             .await
             .map_err(internal)?;
+            injector
+                .after_recovery_step(RecoveryStep::CheckpointInsert)
+                .map_err(RecoveryWriteError::Internal)?;
         }
     }
     Ok(AdvanceLegacyScanOutcome::Advanced(LegacyScanCheckpoint {
@@ -165,9 +190,10 @@ async fn advance_in(
 async fn record_source_changed_degradations(
     connection: &mut SqliteConnection,
     page: &LegacyScanPage,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<(), RecoveryWriteError> {
     for degradation in &page.degradations {
-        record_legacy_degradation_in(connection, degradation, page.now_ms).await?;
+        record_legacy_degradation_in_with(connection, degradation, page.now_ms, injector).await?;
     }
     Ok(())
 }

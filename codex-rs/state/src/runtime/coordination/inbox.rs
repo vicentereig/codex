@@ -101,6 +101,7 @@ pub(crate) enum InboxStep {
     SelectionInsert,
     SelectionUpdate,
     InboxUpdate,
+    MaintenanceRead,
     MaintenanceUpdate,
 }
 

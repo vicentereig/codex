@@ -2,6 +2,9 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 
 use super::degradation_integrity::validate_degradation_outbox_in;
+use super::recovery::NoRecoveryFailure;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_recovery::DegradationReason;
@@ -15,10 +18,26 @@ pub(super) async fn record_maintenance_degradation_in(
     degradation: &CheckedMaintenanceDegradation,
     created_at_ms: i64,
 ) -> Result<bool, RecoveryWriteError> {
-    recovery_guard::validate_anchor(
+    record_maintenance_degradation_in_with(
+        connection,
+        degradation,
+        created_at_ms,
+        &NoRecoveryFailure,
+    )
+    .await
+}
+
+pub(super) async fn record_maintenance_degradation_in_with(
+    connection: &mut SqliteConnection,
+    degradation: &CheckedMaintenanceDegradation,
+    created_at_ms: i64,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<bool, RecoveryWriteError> {
+    recovery_guard::validate_anchor_with(
         connection,
         &degradation.root_thread_id,
         degradation.after_revision,
+        injector,
     )
     .await?;
     let mut rows = sqlx::query(
@@ -36,6 +55,7 @@ pub(super) async fn record_maintenance_degradation_in(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::RecoveryRead)?;
     if rows.len() > 1 {
         return Err(RecoveryWriteError::IdentityCollision);
     }
@@ -49,6 +69,7 @@ pub(super) async fn record_maintenance_degradation_in(
             0,
         )
         .await?;
+        boundary(injector, RecoveryStep::RecoveryRead)?;
         return Ok(false);
     }
     sqlx::query(
@@ -79,6 +100,7 @@ pub(super) async fn record_maintenance_degradation_in(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::DegradationInsert)?;
     sqlx::query(
         "INSERT INTO coordination_degradation_publication_outbox \
          (degradation_id,root_thread_id,after_revision,source_ordinal,stable_record_id,status,\
@@ -94,7 +116,17 @@ pub(super) async fn record_maintenance_degradation_in(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::DegradationOutboxInsert)?;
     Ok(true)
+}
+
+fn boundary(
+    injector: &dyn RecoveryFailureInjector,
+    step: RecoveryStep,
+) -> Result<(), RecoveryWriteError> {
+    injector
+        .after_recovery_step(step)
+        .map_err(RecoveryWriteError::Internal)
 }
 
 fn compare_existing(

@@ -36,7 +36,7 @@ pub(super) async fn record_exogenous_terminal_degradation_with(
     let Some(observation) = observation.check()? else {
         return Ok(RecordExogenousTerminalOutcome::UnknownProvenance);
     };
-    let mut connection = recovery_guard::begin(pool).await?;
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = record_checked(&mut connection, &observation, injector).await;
     recovery_guard::finish_with(&mut connection, result, injector).await
 }
@@ -46,16 +46,18 @@ pub(super) async fn record_checked(
     observation: &CheckedExogenousTerminalObservation,
     injector: &dyn RecoveryFailureInjector,
 ) -> Result<RecordExogenousTerminalOutcome, RecoveryWriteError> {
-    recovery_guard::active_authority(
+    recovery_guard::active_authority_with(
         connection,
         &observation.root_thread_id,
         observation.captured_state_epoch,
+        injector,
     )
     .await?;
-    recovery_guard::validate_anchor(
+    recovery_guard::validate_anchor_with(
         connection,
         &observation.root_thread_id,
         observation.after_revision,
+        injector,
     )
     .await?;
     let mut rows = sqlx::query(
@@ -73,6 +75,9 @@ pub(super) async fn record_checked(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::LegacyRead)
+        .map_err(RecoveryWriteError::Internal)?;
     if rows.len() > 1 {
         return Err(RecoveryWriteError::IdentityCollision);
     }
@@ -86,6 +91,9 @@ pub(super) async fn record_checked(
             observation.source.source_ordinal,
         )
         .await?;
+        injector
+            .after_recovery_step(RecoveryStep::PublicationRead)
+            .map_err(RecoveryWriteError::Internal)?;
         return Ok(RecordExogenousTerminalOutcome::Duplicate(record(
             observation,
         )));

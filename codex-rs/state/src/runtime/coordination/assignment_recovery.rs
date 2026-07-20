@@ -6,7 +6,9 @@ use codex_protocol::ThreadId;
 use sqlx::Row;
 use sqlx::SqliteConnection;
 
-use super::maintenance_degradation::record_maintenance_degradation_in;
+use super::maintenance_degradation::record_maintenance_degradation_in_with;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use crate::model::coordination_recovery::DegradationReason;
 use crate::model::coordination_recovery_maintenance::CheckedMaintenanceDegradation;
@@ -17,6 +19,7 @@ pub(super) async fn classify_stranded_assignments(
     state_epoch: StateEpoch,
     now_ms: i64,
     limit: u32,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<u64, RecoveryWriteError> {
     let candidates = sqlx::query(
         "SELECT g.assignment_id,g.generation,g.created_revision,h.root_thread_id,\
@@ -38,6 +41,9 @@ pub(super) async fn classify_stranded_assignments(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::RecoveryRead)
+        .map_err(RecoveryWriteError::Internal)?;
     let mut changed = 0;
     for candidate in candidates {
         let degradation = CheckedMaintenanceDegradation::new(
@@ -65,7 +71,9 @@ pub(super) async fn classify_stranded_assignments(
         {
             return Err(RecoveryWriteError::CorruptState);
         }
-        if record_maintenance_degradation_in(connection, &degradation, now_ms).await? {
+        if record_maintenance_degradation_in_with(connection, &degradation, now_ms, injector)
+            .await?
+        {
             changed += 1;
         }
     }

@@ -7,7 +7,9 @@ use codex_protocol::ThreadId;
 use sqlx::Row;
 use sqlx::SqliteConnection;
 
-use super::maintenance_degradation::record_maintenance_degradation_in;
+use super::maintenance_degradation::record_maintenance_degradation_in_with;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use crate::model::coordination_recovery::DegradationReason;
 use crate::model::coordination_recovery_maintenance::CheckedMaintenanceDegradation;
@@ -18,6 +20,7 @@ pub(super) async fn record_expired_payload_degradations(
     state_epoch: StateEpoch,
     receipts: &[ReceiptId],
     created_at_ms: i64,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<(), RecoveryWriteError> {
     for receipt in receipts {
         let row = sqlx::query(
@@ -30,6 +33,9 @@ pub(super) async fn record_expired_payload_degradations(
         .await
         .map_err(internal)?
         .ok_or(RecoveryWriteError::CorruptState)?;
+        injector
+            .after_recovery_step(RecoveryStep::RecoveryRead)
+            .map_err(RecoveryWriteError::Internal)?;
         if row.get::<String, _>("lifecycle") != "expired" {
             continue;
         }
@@ -48,7 +54,8 @@ pub(super) async fn record_expired_payload_degradations(
                 .map_err(|_| RecoveryWriteError::CorruptState)?,
         )
         .map_err(RecoveryWriteError::from)?;
-        record_maintenance_degradation_in(connection, &degradation, created_at_ms).await?;
+        record_maintenance_degradation_in_with(connection, &degradation, created_at_ms, injector)
+            .await?;
     }
     Ok(())
 }

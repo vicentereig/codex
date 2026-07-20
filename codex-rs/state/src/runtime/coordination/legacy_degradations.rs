@@ -4,6 +4,9 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 
 use super::degradation_integrity::validate_degradation_outbox_in;
+use super::recovery::NoRecoveryFailure;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_legacy_degradation::CheckedLegacyReductionDegradation;
@@ -16,13 +19,28 @@ pub(super) async fn record_legacy_degradation_in(
     degradation: &CheckedLegacyReductionDegradation,
     created_at_ms: i64,
 ) -> Result<bool, RecoveryWriteError> {
-    recovery_guard::validate_anchor(
+    record_legacy_degradation_in_with(connection, degradation, created_at_ms, &NoRecoveryFailure)
+        .await
+}
+
+pub(super) async fn record_legacy_degradation_in_with(
+    connection: &mut SqliteConnection,
+    degradation: &CheckedLegacyReductionDegradation,
+    created_at_ms: i64,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<bool, RecoveryWriteError> {
+    recovery_guard::validate_anchor_with(
         connection,
         &degradation.root_thread_id,
         degradation.after_revision,
+        injector,
     )
     .await?;
-    if let Some(row) = existing(connection, degradation).await? {
+    let existing = existing(connection, degradation).await?;
+    injector
+        .after_recovery_step(RecoveryStep::LegacyRead)
+        .map_err(RecoveryWriteError::Internal)?;
+    if let Some(row) = existing {
         compare_existing(degradation, &row)?;
         validate_degradation_outbox_in(
             connection,
@@ -32,6 +50,9 @@ pub(super) async fn record_legacy_degradation_in(
             degradation.source.source_ordinal,
         )
         .await?;
+        injector
+            .after_recovery_step(RecoveryStep::PublicationRead)
+            .map_err(RecoveryWriteError::Internal)?;
         return Ok(false);
     }
     sqlx::query(
@@ -77,6 +98,9 @@ pub(super) async fn record_legacy_degradation_in(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::DegradationInsert)
+        .map_err(RecoveryWriteError::Internal)?;
     sqlx::query(
         "INSERT INTO coordination_degradation_publication_outbox \
          (degradation_id,root_thread_id,after_revision,source_ordinal,stable_record_id,status,\
@@ -93,16 +117,23 @@ pub(super) async fn record_legacy_degradation_in(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::DegradationOutboxInsert)
+        .map_err(RecoveryWriteError::Internal)?;
     Ok(true)
 }
 
 pub(super) async fn validate_existing_legacy_degradation_in(
     connection: &mut SqliteConnection,
     degradation: &CheckedLegacyReductionDegradation,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<(), RecoveryWriteError> {
     let row = existing(connection, degradation)
         .await?
         .ok_or(RecoveryWriteError::CorruptState)?;
+    injector
+        .after_recovery_step(RecoveryStep::LegacyRead)
+        .map_err(RecoveryWriteError::Internal)?;
     compare_existing(degradation, &row)?;
     validate_degradation_outbox_in(
         connection,
@@ -111,7 +142,10 @@ pub(super) async fn validate_existing_legacy_degradation_in(
         degradation.after_revision,
         degradation.source.source_ordinal,
     )
-    .await
+    .await?;
+    injector
+        .after_recovery_step(RecoveryStep::PublicationRead)
+        .map_err(RecoveryWriteError::Internal)
 }
 
 async fn existing(

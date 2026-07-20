@@ -41,8 +41,26 @@ pub(crate) struct RecoveryBatch {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RecoveryStep {
+    TransactionBegin,
+    Rollback,
+    AuthorityRead,
+    MarkerRead,
+    MarkerUpdate,
+    MarkerCommit,
+    AnchorRead,
+    LegacyRead,
+    LegacyInsert,
+    LegacyUpdate,
+    CheckpointRead,
+    CheckpointInsert,
+    CheckpointUpdate,
     DegradationInsert,
     DegradationOutboxInsert,
+    PublicationRead,
+    PublicationUpdate,
+    RecoveryRead,
+    RecoveryUpdate,
+    RecoveryBatchMutation,
     BeforeCommit,
     AfterCommit,
 }

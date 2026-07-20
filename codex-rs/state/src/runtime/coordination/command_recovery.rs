@@ -7,7 +7,9 @@ use codex_coordination::MAX_ID_BYTES;
 use codex_coordination::StateEpoch;
 use codex_protocol::ThreadId;
 
-use super::maintenance_degradation::record_maintenance_degradation_in;
+use super::maintenance_degradation::record_maintenance_degradation_in_with;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use crate::model::coordination_recovery::DegradationReason;
 use crate::model::coordination_recovery_maintenance::CheckedMaintenanceDegradation;
@@ -20,6 +22,7 @@ pub(super) async fn expire_payloads(
     state_epoch: StateEpoch,
     now_ms: i64,
     limit: u32,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<u64, RecoveryWriteError> {
     let candidates = sqlx::query(
         "SELECT c.operation_id,c.root_thread_id,c.operation_kind,c.lifecycle,c.version,\
@@ -32,6 +35,7 @@ pub(super) async fn expire_payloads(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::RecoveryRead)?;
     let mut changed = 0;
     for candidate in candidates {
         let lifecycle: String = candidate.get("lifecycle");
@@ -52,6 +56,7 @@ pub(super) async fn expire_payloads(
         .execute(&mut *connection)
         .await
         .map_err(internal)?;
+        boundary(injector, RecoveryStep::RecoveryUpdate)?;
         if result.rows_affected() != 1 {
             return Err(RecoveryWriteError::Deferred);
         }
@@ -62,7 +67,8 @@ pub(super) async fn expire_payloads(
                 DegradationReason::ExpiredPayload,
                 candidate.get("expires_at_ms"),
             )?;
-            record_maintenance_degradation_in(connection, &degradation, now_ms).await?;
+            record_maintenance_degradation_in_with(connection, &degradation, now_ms, injector)
+                .await?;
         }
         changed += 1;
     }
@@ -74,6 +80,7 @@ pub(super) async fn poison_uncertain_attempts(
     state_epoch: StateEpoch,
     now_ms: i64,
     limit: u32,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<u64, RecoveryWriteError> {
     let candidates = sqlx::query(
         "SELECT c.operation_id,c.root_thread_id,c.operation_kind,c.version,c.lease_epoch,\
@@ -88,6 +95,7 @@ pub(super) async fn poison_uncertain_attempts(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::RecoveryRead)?;
     let mut changed = 0;
     for candidate in candidates {
         let result = sqlx::query(
@@ -113,6 +121,7 @@ pub(super) async fn poison_uncertain_attempts(
         .execute(&mut *connection)
         .await
         .map_err(internal)?;
+        boundary(injector, RecoveryStep::RecoveryUpdate)?;
         if result.rows_affected() != 1 {
             return Err(RecoveryWriteError::Deferred);
         }
@@ -122,7 +131,7 @@ pub(super) async fn poison_uncertain_attempts(
             DegradationReason::PoisonedAttempt,
             candidate.get("lease_expires_at_ms"),
         )?;
-        record_maintenance_degradation_in(connection, &degradation, now_ms).await?;
+        record_maintenance_degradation_in_with(connection, &degradation, now_ms, injector).await?;
         changed += 1;
     }
     Ok(changed)
@@ -166,6 +175,7 @@ pub(super) async fn reclaim_safe_leases(
     connection: &mut SqliteConnection,
     now_ms: i64,
     limit: u32,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<u64, RecoveryWriteError> {
     let result = sqlx::query(
         "UPDATE coordination_commands SET lifecycle='pending',version=version+1,\
@@ -182,7 +192,17 @@ pub(super) async fn reclaim_safe_leases(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    boundary(injector, RecoveryStep::RecoveryUpdate)?;
     Ok(result.rows_affected())
+}
+
+fn boundary(
+    injector: &dyn RecoveryFailureInjector,
+    step: RecoveryStep,
+) -> Result<(), RecoveryWriteError> {
+    injector
+        .after_recovery_step(step)
+        .map_err(RecoveryWriteError::Internal)
 }
 
 fn internal(error: impl Into<anyhow::Error>) -> RecoveryWriteError {

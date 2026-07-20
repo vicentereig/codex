@@ -3,6 +3,9 @@ use sqlx::Row;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
 
+use super::recovery::NoRecoveryFailure;
+use super::recovery::RecoveryFailureInjector;
+use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_guard;
 use crate::model::coordination_recovery::CheckedLegacyLink;
@@ -15,22 +18,45 @@ pub(crate) async fn record_legacy_link(
     pool: &SqlitePool,
     link: &CheckedLegacyLink,
 ) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
-    let mut connection = recovery_guard::begin(pool).await?;
-    let result = record_legacy_link_in(&mut connection, link).await;
-    recovery_guard::finish(&mut connection, result).await
+    record_legacy_link_with(pool, link, &NoRecoveryFailure).await
+}
+
+pub(super) async fn record_legacy_link_with(
+    pool: &SqlitePool,
+    link: &CheckedLegacyLink,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
+    let mut connection = recovery_guard::begin_with(pool, injector).await?;
+    let result = record_legacy_link_in_with(&mut connection, link, injector).await;
+    recovery_guard::finish_with(&mut connection, result, injector).await
 }
 
 pub(super) async fn record_legacy_link_in(
     connection: &mut SqliteConnection,
     link: &CheckedLegacyLink,
 ) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
-    recovery_guard::active_authority(
+    record_legacy_link_in_with(connection, link, &NoRecoveryFailure).await
+}
+
+pub(super) async fn record_legacy_link_in_with(
+    connection: &mut SqliteConnection,
+    link: &CheckedLegacyLink,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
+    recovery_guard::active_authority_with(
         connection,
         &link.root_thread_id,
         Some(link.expected_state_epoch),
+        injector,
     )
     .await?;
-    recovery_guard::validate_anchor(connection, &link.root_thread_id, link.after_revision).await?;
+    recovery_guard::validate_anchor_with(
+        connection,
+        &link.root_thread_id,
+        link.after_revision,
+        injector,
+    )
+    .await?;
     let mut rows = sqlx::query(
         "SELECT compatibility_event_id,root_thread_id,state_epoch,source_shape,source_thread_id,\
          source_turn_id,source_item_id,source_ordinal,semantic_slot,source_identity_bytes,\
@@ -45,14 +71,17 @@ pub(super) async fn record_legacy_link_in(
     .fetch_all(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::LegacyRead)
+        .map_err(RecoveryWriteError::Internal)?;
     if rows.len() > 1 {
         return Err(RecoveryWriteError::IdentityCollision);
     }
     if let Some(row) = rows.pop() {
         let existing = compare_existing(link, &row)?;
-        return apply_requested_suppression(connection, link, existing).await;
+        return apply_requested_suppression(connection, link, existing, injector).await;
     }
-    validate_native_suppression(connection, link).await?;
+    validate_native_suppression(connection, link, injector).await?;
     let now = chrono::Utc::now().timestamp_millis().max(0);
     let (suppression_id, suppressed_at_ms) = link
         .native_suppression
@@ -101,6 +130,9 @@ pub(super) async fn record_legacy_link_in(
     .execute(&mut *connection)
     .await
     .map_err(internal)?;
+    injector
+        .after_recovery_step(RecoveryStep::LegacyInsert)
+        .map_err(RecoveryWriteError::Internal)?;
     Ok(match link.native_suppression {
         Some(suppression) => RecordLegacyLinkOutcome::Suppressed(
             record(link, Some(suppression.event_id)),
@@ -138,16 +170,34 @@ pub(crate) async fn correlate_legacy_link_with_native(
     native_event_id: CoordinationEventId,
     suppressed_at_ms: i64,
 ) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
+    correlate_legacy_link_with_native_with(
+        pool,
+        link,
+        native_event_id,
+        suppressed_at_ms,
+        &NoRecoveryFailure,
+    )
+    .await
+}
+
+pub(super) async fn correlate_legacy_link_with_native_with(
+    pool: &SqlitePool,
+    link: &CheckedLegacyLink,
+    native_event_id: CoordinationEventId,
+    suppressed_at_ms: i64,
+    injector: &dyn RecoveryFailureInjector,
+) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
     let requested = link
         .clone()
         .with_native_suppression(native_event_id, suppressed_at_ms)?;
-    record_legacy_link(pool, &requested).await
+    record_legacy_link_with(pool, &requested, injector).await
 }
 
 async fn apply_requested_suppression(
     connection: &mut SqliteConnection,
     link: &CheckedLegacyLink,
     existing: RecordLegacyLinkOutcome,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
     let Some(requested) = link.native_suppression else {
         return Ok(existing);
@@ -161,7 +211,7 @@ async fn apply_requested_suppression(
             }
         }
         RecordLegacyLinkOutcome::Duplicate(_) | RecordLegacyLinkOutcome::Linked(_) => {
-            validate_native_suppression(connection, link).await?;
+            validate_native_suppression(connection, link, injector).await?;
             let updated = sqlx::query(
                 "UPDATE coordination_legacy_links SET suppressed_by_native_event_id=?,\
                  suppressed_at_ms=? WHERE compatibility_event_id=?\
@@ -176,6 +226,9 @@ async fn apply_requested_suppression(
             if updated.rows_affected() != 1 {
                 return Err(RecoveryWriteError::NativeCorrelationConflict);
             }
+            injector
+                .after_recovery_step(RecoveryStep::LegacyUpdate)
+                .map_err(RecoveryWriteError::Internal)?;
             Ok(RecordLegacyLinkOutcome::Suppressed(
                 record(link, Some(requested.event_id)),
                 requested.event_id,
@@ -187,6 +240,7 @@ async fn apply_requested_suppression(
 async fn validate_native_suppression(
     connection: &mut SqliteConnection,
     link: &CheckedLegacyLink,
+    injector: &dyn RecoveryFailureInjector,
 ) -> Result<(), RecoveryWriteError> {
     let Some(suppression) = link.native_suppression else {
         return Ok(());
@@ -220,6 +274,9 @@ async fn validate_native_suppression(
     .await
     .map_err(internal)?
     .is_some();
+    injector
+        .after_recovery_step(RecoveryStep::LegacyRead)
+        .map_err(RecoveryWriteError::Internal)?;
     if !valid {
         return Err(RecoveryWriteError::NativeCorrelationConflict);
     }
