@@ -92,6 +92,12 @@ mod command_payload_tests;
 #[path = "commands_tests.rs"]
 mod commands_tests;
 #[cfg(test)]
+#[path = "failure_injection_counter_integrity.rs"]
+mod failure_injection_counter_integrity;
+#[cfg(test)]
+#[path = "failure_injection_degradation_integrity.rs"]
+mod failure_injection_degradation_integrity;
+#[cfg(test)]
 #[path = "failure_injection_support.rs"]
 mod failure_injection_support;
 #[cfg(test)]
