@@ -1,0 +1,320 @@
+use codex_coordination::BoundedId;
+use codex_coordination::CoordinationSemanticSlot;
+use codex_coordination::MAX_ID_BYTES;
+use codex_coordination::StateEpoch;
+use pretty_assertions::assert_eq;
+use sqlx::Row;
+
+use super::aggregate_journal::AggregateStep;
+use super::commands_tests::assignment_command;
+use super::degradation::record_exogenous_terminal_degradation;
+use super::degradation::record_exogenous_terminal_degradation_with;
+use super::failure_injection_support::*;
+use super::inbox_test_support::*;
+use super::recovery::RecoveryStep;
+use super::recovery_test_support::CHILD;
+use super::recovery_test_support::compatibility_event;
+use crate::StateRuntime;
+use crate::model::coordination_commands::RecordCoordinationCommandOutcome;
+use crate::model::coordination_inbox::PersistRecipientReceiptOutcome;
+use crate::model::coordination_recovery::ExogenousTerminalObservation;
+use crate::model::coordination_recovery::LegacySourceIdentity;
+use crate::model::coordination_recovery::RecordExogenousTerminalOutcome;
+use crate::model::coordination_recovery::TerminalEvidenceKind;
+use crate::model::coordination_recovery::TerminalEvidenceOutcome;
+use crate::model::coordination_recovery::TerminalProvenance;
+use crate::runtime::test_support::unique_temp_dir;
+
+const NOW_MS: i64 = 1_753_000_000_000;
+
+pub(super) fn receipt_params_for_matrix()
+-> crate::model::coordination_inbox::PersistRecipientReceipt {
+    receipt_params(
+        super::aggregate_test_support::OPERATION,
+        RECEIPT_ONE,
+        "019f7c6c-1111-7000-8000-000000000702",
+        1,
+        0,
+        Vec::new(),
+    )
+}
+
+fn committed_response_loss(point: CrashPoint) -> bool {
+    matches!(
+        point.boundary,
+        Boundary::Aggregate(AggregateStep::AfterCommit)
+            | Boundary::Recovery(RecoveryStep::AfterCommit)
+    )
+}
+
+#[tokio::test]
+async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyhow::Result<()> {
+    let recorder = CrashInjector::recording(NOW_MS);
+    let runtime = StateRuntime::init(unique_temp_dir(), "test".to_string()).await?;
+    assert!(matches!(
+        runtime
+            .record_coordination_command_intent_with(assignment_command(), &recorder)
+            .await?,
+        RecordCoordinationCommandOutcome::Applied(_)
+    ));
+    let trace = recorder.trace();
+    assert_eq!(trace.len(), 17);
+    assert!(trace.iter().any(|point| {
+        point
+            == &CrashPoint {
+                boundary: Boundary::Command(super::commands::CommandStep::CommandInsert),
+                occurrence: 1,
+            }
+    }));
+    assert!(trace.iter().any(|point| committed_response_loss(*point)));
+
+    for point in trace {
+        let home = unique_temp_dir();
+        let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
+        let before = frozen_state(&runtime).await?;
+        let injector = CrashInjector::fail_at(point, NOW_MS);
+        assert!(
+            runtime
+                .record_coordination_command_intent_with(assignment_command(), &injector)
+                .await
+                .is_err(),
+            "{point:?}"
+        );
+        drop(runtime);
+        let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
+        if committed_response_loss(point) {
+            let committed = frozen_state(&reopened).await?;
+            assert!(matches!(
+                reopened
+                    .record_coordination_command_intent(assignment_command())
+                    .await?,
+                RecordCoordinationCommandOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+        } else {
+            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert!(matches!(
+                reopened
+                    .record_coordination_command_intent(assignment_command())
+                    .await?,
+                RecordCoordinationCommandOutcome::Applied(_)
+            ));
+            let committed = frozen_state(&reopened).await?;
+            drop(reopened);
+            let reopened = StateRuntime::init(home, "test".to_string()).await?;
+            assert!(matches!(
+                reopened
+                    .record_coordination_command_intent(assignment_command())
+                    .await?,
+                RecordCoordinationCommandOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_integrity(&reopened).await?;
+            continue;
+        }
+        assert_integrity(&reopened).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn runtime_with_command_at(
+    home: std::path::PathBuf,
+) -> anyhow::Result<std::sync::Arc<StateRuntime>> {
+    let runtime = StateRuntime::init(home, "test".to_string()).await?;
+    assert!(matches!(
+        runtime
+            .record_coordination_command_intent(assignment_command())
+            .await?,
+        RecordCoordinationCommandOutcome::Applied(_)
+    ));
+    Ok(runtime)
+}
+
+#[tokio::test]
+async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> anyhow::Result<()> {
+    let runtime = runtime_with_command_at(unique_temp_dir()).await?;
+    let now_ms = delivery_now(&runtime).await?;
+    let recorder = CrashInjector::recording(now_ms);
+    assert!(matches!(
+        runtime
+            .persist_coordination_recipient_receipt_with(receipt_params_for_matrix(), &recorder)
+            .await?,
+        PersistRecipientReceiptOutcome::Applied(_)
+    ));
+    let trace = recorder.trace();
+    assert_eq!(trace.len(), 23);
+    assert!(trace.iter().any(|point| {
+        point
+            == &CrashPoint {
+                boundary: Boundary::Inbox(super::inbox::InboxStep::ReceiptInsert),
+                occurrence: 1,
+            }
+    }));
+    assert!(
+        trace
+            .iter()
+            .filter(|point| {
+                point.boundary == Boundary::Aggregate(AggregateStep::AggregateMutation)
+            })
+            .count()
+            >= 3
+    );
+
+    for point in trace {
+        let home = unique_temp_dir();
+        let runtime = runtime_with_command_at(home.clone()).await?;
+        let now_ms = delivery_now(&runtime).await?;
+        let before = frozen_state(&runtime).await?;
+        let injector = CrashInjector::fail_at(point, now_ms);
+        assert!(
+            runtime
+                .persist_coordination_recipient_receipt_with(
+                    receipt_params_for_matrix(),
+                    &injector,
+                )
+                .await
+                .is_err(),
+            "{point:?}"
+        );
+        drop(runtime);
+        let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
+        if committed_response_loss(point) {
+            let committed = frozen_state(&reopened).await?;
+            assert!(matches!(
+                reopened
+                    .persist_coordination_recipient_receipt(receipt_params_for_matrix())
+                    .await?,
+                PersistRecipientReceiptOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+        } else {
+            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert!(matches!(
+                reopened
+                    .persist_coordination_recipient_receipt(receipt_params_for_matrix())
+                    .await?,
+                PersistRecipientReceiptOutcome::Applied(_)
+            ));
+            let committed = frozen_state(&reopened).await?;
+            drop(reopened);
+            let reopened = StateRuntime::init(home, "test".to_string()).await?;
+            assert!(matches!(
+                reopened
+                    .persist_coordination_recipient_receipt(receipt_params_for_matrix())
+                    .await?,
+                PersistRecipientReceiptOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_integrity(&reopened).await?;
+            continue;
+        }
+        assert_integrity(&reopened).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn delivery_now(runtime: &StateRuntime) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT intent_at_ms + 1 FROM coordination_commands WHERE operation_id=?",
+    )
+    .bind(super::aggregate_test_support::OPERATION)
+    .fetch_one(&*runtime.pool)
+    .await?)
+}
+
+#[tokio::test]
+async fn degradation_trace_reopens_atomically_and_replays_one_pair() -> anyhow::Result<()> {
+    let recorder = CrashInjector::recording(NOW_MS);
+    let (runtime, epoch) = runtime_with_root_at(unique_temp_dir()).await?;
+    assert!(matches!(
+        record_exogenous_terminal_degradation_with(&runtime.pool, observation(epoch)?, &recorder,)
+            .await?,
+        RecordExogenousTerminalOutcome::Applied(_)
+    ));
+    let trace = recorder.trace();
+    assert_eq!(trace.len(), 4);
+    assert_eq!(
+        trace.iter().map(|point| point.boundary).collect::<Vec<_>>(),
+        vec![
+            Boundary::Recovery(RecoveryStep::DegradationInsert),
+            Boundary::Recovery(RecoveryStep::DegradationOutboxInsert),
+            Boundary::Recovery(RecoveryStep::BeforeCommit),
+            Boundary::Recovery(RecoveryStep::AfterCommit),
+        ]
+    );
+
+    for point in trace {
+        let home = unique_temp_dir();
+        let (runtime, epoch) = runtime_with_root_at(home.clone()).await?;
+        let before = frozen_state(&runtime).await?;
+        let evidence = observation(epoch)?;
+        assert!(
+            record_exogenous_terminal_degradation_with(
+                &runtime.pool,
+                evidence.clone(),
+                &CrashInjector::fail_at(point, NOW_MS),
+            )
+            .await
+            .is_err(),
+            "{point:?}"
+        );
+        drop(runtime);
+        let reopened = StateRuntime::init(home, "test".to_string()).await?;
+        if committed_response_loss(point) {
+            let committed = frozen_state(&reopened).await?;
+            assert!(matches!(
+                record_exogenous_terminal_degradation(&reopened.pool, evidence).await?,
+                RecordExogenousTerminalOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed);
+        } else {
+            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert!(matches!(
+                record_exogenous_terminal_degradation(&reopened.pool, evidence.clone()).await?,
+                RecordExogenousTerminalOutcome::Applied(_)
+            ));
+            let committed = frozen_state(&reopened).await?;
+            assert!(matches!(
+                record_exogenous_terminal_degradation(&reopened.pool, evidence).await?,
+                RecordExogenousTerminalOutcome::Duplicate(_)
+            ));
+            assert_eq!(frozen_state(&reopened).await?, committed);
+        }
+        assert_integrity(&reopened).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn runtime_with_root_at(
+    home: std::path::PathBuf,
+) -> anyhow::Result<(std::sync::Arc<StateRuntime>, StateEpoch)> {
+    let runtime = StateRuntime::init(home, "test".to_string()).await?;
+    runtime
+        .reserve_coordination_assignment(super::aggregate_test_support::reserve_params())
+        .await?;
+    let row = sqlx::query("SELECT state_epoch FROM coordination_authority WHERE singleton_id=1")
+        .fetch_one(&*runtime.pool)
+        .await?;
+    Ok((
+        runtime,
+        StateEpoch::parse(&row.get::<String, _>("state_epoch"))?,
+    ))
+}
+
+pub(super) fn observation(epoch: StateEpoch) -> anyhow::Result<ExogenousTerminalObservation> {
+    let event = compatibility_event(CoordinationSemanticSlot::TurnCompleted, 23);
+    Ok(ExogenousTerminalObservation {
+        root_thread_id: super::aggregate_test_support::thread(super::aggregate_test_support::ROOT),
+        captured_state_epoch: Some(epoch),
+        provenance: TerminalProvenance::Known(LegacySourceIdentity::from_event(&event)?),
+        target_thread_id: super::aggregate_test_support::thread(CHILD),
+        target_turn_id: BoundedId::<MAX_ID_BYTES>::new("turn-b")?,
+        terminal_kind: TerminalEvidenceKind::Completed,
+        terminal_outcome: TerminalEvidenceOutcome::Succeeded,
+        included_generations: codex_coordination::Evidence::Known {
+            value: vec![super::aggregate_test_support::generation(1)],
+        },
+        observed_at: 1_753_000_100,
+        after_revision: 1,
+    })
+}

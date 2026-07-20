@@ -1366,6 +1366,7 @@ fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransp
 #[cfg(test)]
 mod tests {
     use super::LogFormat;
+    use super::init_sqlite_state_db_with_fresh_start_on_corruption;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
     use super::retain_state_corruption_provenance;
@@ -1374,6 +1375,7 @@ mod tests {
     #[cfg(debug_assertions)]
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
 
     #[test]
     fn log_format_from_env_value_matches_json_values_case_insensitively() {
@@ -1414,6 +1416,60 @@ mod tests {
             retain_state_corruption_provenance(Some(1), state, state, None),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn app_server_primary_corruption_mints_fresh_provenance_and_quarantines_coordination()
+    -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let config = codex_core::config::ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await?;
+        assert_eq!(config.sqlite_home, codex_home.path());
+
+        let original =
+            codex_state::StateRuntime::init(config.sqlite_home.clone(), "test".to_string()).await?;
+        let original_epoch = match original.coordination_authority() {
+            codex_state::CoordinationAuthorityStatus::Active { state_epoch } => *state_epoch,
+            status => anyhow::bail!("expected active original authority, got {status:?}"),
+        };
+        let marker_path = config.sqlite_home.join("coordination-authority-v1.json");
+        let original_marker = tokio::fs::read(&marker_path).await?;
+        original.close().await;
+        drop(original);
+        tokio::fs::write(
+            codex_state::state_db_path(config.sqlite_home.as_path()),
+            b"not a sqlite database: primary corruption fixture",
+        )
+        .await?;
+
+        let initialized = init_sqlite_state_db_with_fresh_start_on_corruption(&config).await?;
+        assert!(initialized.recovery_notice.is_some());
+        let rebuilt = initialized.state_db.expect("rebuilt state runtime");
+        let rebuilt_epoch = match rebuilt.coordination_authority() {
+            codex_state::CoordinationAuthorityStatus::Quarantined {
+                state_epoch: Some(state_epoch),
+                reason,
+            } => {
+                assert!(reason.contains("fresh_after_corruption"));
+                *state_epoch
+            }
+            status => anyhow::bail!("expected quarantined rebuilt authority, got {status:?}"),
+        };
+        assert_ne!(rebuilt_epoch, original_epoch);
+        assert_ne!(tokio::fs::read(&marker_path).await?, original_marker);
+
+        rebuilt.get_backfill_state().await?;
+        let entries = std::fs::read_dir(config.sqlite_home.as_path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert!(
+            !entries
+                .iter()
+                .any(|name| { name.to_string_lossy().contains("coordination-sidecar") })
+        );
+        Ok(())
     }
 
     #[cfg(debug_assertions)]

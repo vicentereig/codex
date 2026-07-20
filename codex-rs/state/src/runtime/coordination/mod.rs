@@ -74,6 +74,9 @@ mod aggregate_transition_tests;
 #[path = "authority_tests.rs"]
 mod authority_tests;
 #[cfg(test)]
+#[path = "capability_off_tests.rs"]
+mod capability_off_tests;
+#[cfg(test)]
 #[path = "command_atomicity_tests.rs"]
 mod command_atomicity_tests;
 #[cfg(test)]
@@ -88,6 +91,12 @@ mod command_payload_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod commands_tests;
+#[cfg(test)]
+#[path = "failure_injection_support.rs"]
+mod failure_injection_support;
+#[cfg(test)]
+#[path = "failure_injection_tests.rs"]
+mod failure_injection_tests;
 #[cfg(test)]
 #[path = "inbox_failure_tests.rs"]
 mod inbox_failure_tests;
