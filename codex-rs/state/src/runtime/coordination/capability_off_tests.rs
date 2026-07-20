@@ -143,17 +143,22 @@ async fn pending_outboxes_remain_unpublished_across_restart_and_clock_advance() 
 }
 
 async fn assert_pending_and_unpublished(runtime: &StateRuntime) -> anyhow::Result<()> {
-    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM coordination_projection_outbox WHERE status='pending'),\
+         (SELECT COUNT(*) FROM coordination_projection_outbox),\
          (SELECT COUNT(*) FROM coordination_degradation_publication_outbox WHERE status='pending'),\
+         (SELECT COUNT(*) FROM coordination_degradation_publication_outbox),\
          (SELECT COUNT(*) FROM coordination_roots WHERE published_revision=0),\
          (SELECT COUNT(*) FROM coordination_roots)",
     )
     .fetch_one(&*runtime.pool)
     .await?;
-    assert!(counts.0 > 0);
     assert!(counts.1 > 0);
-    assert_eq!(counts.2, counts.3);
+    assert!(counts.3 > 0);
+    assert_eq!(
+        (counts.0, counts.2, counts.4),
+        (counts.1, counts.3, counts.5)
+    );
     Ok(())
 }
 
