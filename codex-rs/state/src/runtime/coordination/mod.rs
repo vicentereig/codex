@@ -105,6 +105,12 @@ mod failure_injection_counter_integrity;
 #[path = "failure_injection_degradation_integrity.rs"]
 mod failure_injection_degradation_integrity;
 #[cfg(test)]
+#[path = "failure_injection_inbox_matrix_support.rs"]
+mod failure_injection_inbox_matrix_support;
+#[cfg(test)]
+#[path = "failure_injection_inbox_matrix_tests.rs"]
+mod failure_injection_inbox_matrix_tests;
+#[cfg(test)]
 #[path = "failure_injection_integrity.rs"]
 mod failure_injection_integrity;
 #[cfg(test)]
