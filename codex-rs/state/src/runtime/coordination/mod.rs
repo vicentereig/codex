@@ -98,6 +98,12 @@ mod failure_injection_counter_integrity;
 #[path = "failure_injection_degradation_integrity.rs"]
 mod failure_injection_degradation_integrity;
 #[cfg(test)]
+#[path = "failure_injection_integrity.rs"]
+mod failure_injection_integrity;
+#[cfg(test)]
+#[path = "failure_injection_integrity_tests.rs"]
+mod failure_injection_integrity_tests;
+#[cfg(test)]
 #[path = "failure_injection_support.rs"]
 mod failure_injection_support;
 #[cfg(test)]
