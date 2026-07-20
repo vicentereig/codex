@@ -255,3 +255,301 @@ async fn repair_recency_migration_succeeds_while_another_connection_holds_writer
     pool.close().await;
     repair_result.expect("current migration history should not need the writer slot");
 }
+
+#[tokio::test]
+async fn coordination_authority_and_journal_are_independent_and_guarded() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.clone());
+    let pool = sqlite
+        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .await
+        .expect("sqlite database should open");
+    migrator_through(/*version*/ 45)
+        .run(&pool)
+        .await
+        .expect("migrations through the previous namespace should apply");
+
+    sqlx::query(
+        r#"
+INSERT INTO delegations (
+    delegation_id, run_id, parent_thread_id, parent_turn_id, owner_session_id,
+    agent_path, status, version, attempt, lease_epoch, created_at_ms, updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind("legacy-delegation")
+    .bind("legacy-run")
+    .bind("legacy-parent")
+    .bind("legacy-turn")
+    .bind("legacy-owner")
+    .bind("/root/legacy")
+    .bind("running")
+    .bind(7_i64)
+    .bind(3_i64)
+    .bind(5_i64)
+    .bind(100_i64)
+    .bind(200_i64)
+    .execute(&pool)
+    .await
+    .expect("pre-0046 delegation should insert");
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("coordination namespace migration should apply after 0045");
+
+    let epoch = "019f7c6c-1111-7000-8000-000000000801";
+    let root = "019f7c6c-1111-7000-8000-000000000601";
+    let event = "019f7c6c-1111-7000-8000-000000000701";
+    sqlx::query(
+        "INSERT INTO coordination_authority \
+         (state_epoch, status, created_at_ms, updated_at_ms) VALUES (?, 'active', 10, 10)",
+    )
+    .bind(epoch)
+    .execute(&pool)
+    .await
+    .expect("singleton authority should insert");
+    assert!(
+        sqlx::query(
+            "INSERT INTO coordination_authority \
+             (state_epoch, status, created_at_ms, updated_at_ms) VALUES (?, 'active', 10, 10)",
+        )
+        .bind("019f7c6c-1111-7000-8000-000000000802")
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE coordination_authority SET state_epoch = ?")
+            .bind("019f7c6c-1111-7000-8000-000000000802")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT OR REPLACE INTO coordination_authority \
+             (state_epoch, status, created_at_ms, updated_at_ms) \
+             VALUES (?, 'active', 10, 10)",
+        )
+        .bind("019f7c6c-1111-7000-8000-000000000802")
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM coordination_authority")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::query(
+        "UPDATE coordination_authority SET status = 'quarantined', \
+         quarantine_reason = 'marker mismatch', updated_at_ms = 11",
+    )
+    .execute(&pool)
+    .await
+    .expect("authority may transition to quarantined");
+    assert!(
+        sqlx::query("UPDATE coordination_authority SET status = 'active', updated_at_ms = 12",)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE coordination_authority SET status = 'active', \
+             quarantine_reason = NULL, updated_at_ms = 12",
+        )
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+
+    sqlx::query(
+        "INSERT INTO coordination_roots \
+         (root_thread_id, state_epoch, committed_revision, published_revision, \
+          created_at_ms, updated_at_ms) VALUES (?, ?, 1, 0, 20, 20)",
+    )
+    .bind(root)
+    .bind(epoch)
+    .execute(&pool)
+    .await
+    .expect("coordination root should insert");
+    assert!(
+        sqlx::query(
+            "INSERT OR REPLACE INTO coordination_roots \
+             (root_thread_id, state_epoch, committed_revision, published_revision, \
+              created_at_ms, updated_at_ms) VALUES (?, ?, 0, 0, 20, 20)",
+        )
+        .bind(root)
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO coordination_roots \
+             (root_thread_id, state_epoch, committed_revision, published_revision, \
+              created_at_ms, updated_at_ms) VALUES (?, ?, 0, 1, 20, 20)",
+        )
+        .bind("019f7c6c-1111-7000-8000-000000000602")
+        .bind(epoch)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+
+    let insert_event = r#"
+INSERT INTO coordination_events (
+    event_id, root_thread_id, revision, canonical_event_bytes, event_fingerprint,
+    idempotency_key_bytes, idempotency_key_fingerprint, occurred_at, created_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    "#;
+    sqlx::query(insert_event)
+        .bind(event)
+        .bind(root)
+        .bind(1_i64)
+        .bind(br#"{"kind":"assignmentRequested"}"#.as_slice())
+        .bind(vec![0x11_u8; 32])
+        .bind(b"canonical-idempotency-tuple".as_slice())
+        .bind(vec![0x22_u8; 32])
+        .bind(1_753_000_000_i64)
+        .bind(30_i64)
+        .execute(&pool)
+        .await
+        .expect("bounded immutable event should insert");
+    assert!(
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO coordination_events (
+    event_id, root_thread_id, revision, canonical_event_bytes, event_fingerprint,
+    idempotency_key_bytes, idempotency_key_fingerprint, occurred_at, created_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(event)
+        .bind(root)
+        .bind(1_i64)
+        .bind(b"{}".as_slice())
+        .bind(vec![0x99_u8; 32])
+        .bind(b"replacement-key".as_slice())
+        .bind(vec![0x98_u8; 32])
+        .bind(0_i64)
+        .bind(31_i64)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE coordination_roots SET committed_revision = 0, updated_at_ms = 21 \
+             WHERE root_thread_id = ?",
+        )
+        .bind(root)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "UPDATE coordination_roots SET published_revision = 1, updated_at_ms = 21 \
+         WHERE root_thread_id = ?",
+    )
+    .bind(root)
+    .execute(&pool)
+    .await
+    .expect("published watermark may advance to committed revision");
+    assert!(
+        sqlx::query(
+            "UPDATE coordination_roots SET published_revision = 0, updated_at_ms = 22 \
+             WHERE root_thread_id = ?",
+        )
+        .bind(root)
+        .execute(&pool)
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "INSERT INTO coordination_projection_outbox \
+         (event_id, status, created_at_ms, updated_at_ms) VALUES (?, 'pending', 30, 30)",
+    )
+    .bind(event)
+    .execute(&pool)
+    .await
+    .expect("projection work should insert separately");
+    sqlx::query(
+        "UPDATE coordination_projection_outbox SET status = 'leased', version = 1, \
+         lease_epoch = 1, lease_expires_at_ms = 100, updated_at_ms = 31 WHERE event_id = ?",
+    )
+    .bind(event)
+    .execute(&pool)
+    .await
+    .expect("projection lease state should remain mutable");
+
+    assert!(
+        sqlx::query("UPDATE coordination_events SET occurred_at = 0 WHERE event_id = ?")
+            .bind(event)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM coordination_events WHERE event_id = ?")
+            .bind(event)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(insert_event)
+            .bind("019f7c6c-1111-7000-8000-000000000702")
+            .bind(root)
+            .bind(1_i64)
+            .bind(b"{}".as_slice())
+            .bind(vec![0x33_u8; 32])
+            .bind(b"different-key".as_slice())
+            .bind(vec![0x44_u8; 32])
+            .bind(1_i64)
+            .bind(31_i64)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(insert_event)
+            .bind("019f7c6c-1111-7000-8000-000000000703")
+            .bind(root)
+            .bind(2_i64)
+            .bind(vec![b'x'; 8193])
+            .bind(vec![0x55_u8; 32])
+            .bind(b"oversized-event".as_slice())
+            .bind(vec![0x66_u8; 32])
+            .bind(2_i64)
+            .bind(32_i64)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+
+    let delegation = sqlx::query(
+        "SELECT run_id, status, version, attempt, lease_epoch \
+         FROM delegations WHERE delegation_id = 'legacy-delegation'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("existing delegation should remain");
+    assert_eq!(delegation.get::<String, _>("run_id"), "legacy-run");
+    assert_eq!(delegation.get::<String, _>("status"), "running");
+    assert_eq!(delegation.get::<i64, _>("version"), 7);
+    assert_eq!(delegation.get::<i64, _>("attempt"), 3);
+    assert_eq!(delegation.get::<i64, _>("lease_epoch"), 5);
+
+    pool.close().await;
+}
