@@ -101,6 +101,12 @@ uuid_id!(ReceiptId, Version::SortRand);
 uuid_id!(ResultId, Version::SortRand);
 uuid_id!(StateEpoch, Version::SortRand);
 
+impl CoordinationEventId {
+    pub(crate) fn new_compatibility_v5(namespace: &Uuid, name: &[u8]) -> Self {
+        Self(Uuid::new_v5(namespace, name))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct BoundedId<const N: usize>(String);

@@ -17,8 +17,9 @@ codex-protocol = { workspace = true }
 codex-secrets = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v7"] }
+uuid = { workspace = true, features = ["serde", "v5", "v7"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

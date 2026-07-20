@@ -3,9 +3,21 @@
 //! This crate intentionally contains no runtime producer or public capability.
 
 mod checked;
+mod compatibility;
+mod evidence;
 
 pub use checked::*;
+pub use compatibility::*;
+pub use evidence::*;
 
 #[cfg(test)]
 #[path = "checked_tests.rs"]
 mod checked_tests;
+
+#[cfg(test)]
+#[path = "compatibility_tests.rs"]
+mod compatibility_tests;
+
+#[cfg(test)]
+#[path = "evidence_tests.rs"]
+mod evidence_tests;
