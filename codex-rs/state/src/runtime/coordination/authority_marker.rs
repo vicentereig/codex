@@ -12,7 +12,7 @@ use super::authority::AuthorityFailureInjector;
 use super::authority::AuthorityWriteStep;
 
 pub(crate) const MARKER_FILE_NAME: &str = "coordination-authority-v1.json";
-const MAX_MARKER_BYTES: u64 = 512;
+pub(super) const MAX_MARKER_BYTES: u64 = 512;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

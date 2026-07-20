@@ -1,9 +1,16 @@
+use std::ffi::OsString;
+use std::fmt;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
-use pretty_assertions::assert_eq;
+use sha2::Digest;
+use sha2::Sha256;
 use sqlx::Row;
+use sqlx::TypeInfo;
+use sqlx::ValueRef;
+use tokio::io::AsyncReadExt;
 
 use super::aggregate_journal::AggregateFailureInjector;
 use super::aggregate_journal::AggregateStep;
@@ -14,6 +21,8 @@ use super::inbox::InboxStep;
 use super::recovery::RecoveryFailureInjector;
 use super::recovery::RecoveryStep;
 use crate::StateRuntime;
+
+pub(super) use super::failure_injection_integrity::assert_integrity;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Boundary {
@@ -121,10 +130,120 @@ impl RecoveryFailureInjector for CrashInjector {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct FrozenCoordinationState(Vec<(String, Vec<String>)>);
+pub(super) struct FrozenCoordinationState {
+    pub(super) tables: Vec<FrozenTable>,
+    pub(super) marker: FrozenMarker,
+    pub(super) directory_entries: Vec<FrozenDirectoryEntry>,
+    pub(super) controlled_effect_count: usize,
+}
+
+pub(super) struct FrozenStateInputs<'a> {
+    pub(super) sqlite_home: &'a Path,
+    pub(super) controlled_effect_count: usize,
+}
+
+impl<'a> FrozenStateInputs<'a> {
+    pub(super) fn new(sqlite_home: &'a Path) -> Self {
+        Self {
+            sqlite_home,
+            controlled_effect_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct FrozenTable {
+    pub(super) name: String,
+    pub(super) columns: Vec<String>,
+    pub(super) rows: Vec<Vec<FrozenCell>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum FrozenCell {
+    Null,
+    Integer(i64),
+    RealBits(u64),
+    Text(RedactedText),
+    Blob(RedactedBytes),
+    Ciphertext(OpaqueCiphertext),
+}
+
+#[derive(Eq, PartialEq)]
+pub(super) struct RedactedText(String);
+
+impl fmt::Debug for RedactedText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted text: {} bytes>", self.0.len())
+    }
+}
+
+#[derive(Eq, PartialEq)]
+pub(super) struct RedactedBytes(Vec<u8>);
+
+impl fmt::Debug for RedactedBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted bytes: {} bytes>", self.0.len())
+    }
+}
+
+#[derive(Eq, PartialEq)]
+pub(super) struct OpaqueCiphertext {
+    len: usize,
+    digest: [u8; 32],
+}
+
+impl fmt::Debug for OpaqueCiphertext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted ciphertext: {} bytes>", self.len)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum FrozenMarker {
+    Missing,
+    Entry {
+        kind: FrozenEntryKind,
+        contents: FrozenMarkerContents,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum FrozenMarkerContents {
+    Bounded(RedactedBytes),
+    Oversized { len: u64 },
+    NotRegular,
+}
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct FrozenDirectoryEntry {
+    pub(super) name: RedactedOsString,
+    pub(super) kind: FrozenEntryKind,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct RedactedOsString(OsString);
+
+impl fmt::Debug for RedactedOsString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "<redacted file name: {} encoded bytes>",
+            self.0.len()
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum FrozenEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
 
 pub(super) async fn frozen_state(
     runtime: &StateRuntime,
+    inputs: FrozenStateInputs<'_>,
 ) -> anyhow::Result<FrozenCoordinationState> {
     let tables = [
         ("coordination_authority", "state_epoch"),
@@ -177,55 +296,119 @@ pub(super) async fn frozen_state(
             .into_iter()
             .map(|row| row.get::<String, _>("name"))
             .collect::<Vec<_>>();
-        let encoded = columns
-            .iter()
-            .map(|column| format!("quote(\"{}\")", column.replace('"', "\"\"")))
-            .collect::<Vec<_>>()
-            .join(" || char(31) || ");
-        let rows = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-            "SELECT {encoded} FROM {table} ORDER BY {order}"
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT * FROM {table} ORDER BY {order}"
         )))
         .fetch_all(&*runtime.pool)
         .await?;
-        dumps.push((table.to_string(), rows));
+        let rows = rows
+            .iter()
+            .map(|row| freeze_row(table, columns.as_slice(), row))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        dumps.push(FrozenTable {
+            name: table.to_string(),
+            columns,
+            rows,
+        });
     }
-    Ok(FrozenCoordinationState(dumps))
+    Ok(FrozenCoordinationState {
+        tables: dumps,
+        marker: freeze_marker(inputs.sqlite_home).await?,
+        directory_entries: freeze_directory(inputs.sqlite_home).await?,
+        controlled_effect_count: inputs.controlled_effect_count,
+    })
 }
 
-pub(super) async fn assert_integrity(runtime: &StateRuntime) -> anyhow::Result<()> {
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
-            .fetch_all(&*runtime.pool)
-            .await?,
-        vec!["ok".to_string()]
-    );
-    assert_eq!(
-        sqlx::query("PRAGMA foreign_key_check")
-            .fetch_all(&*runtime.pool)
-            .await?
-            .len(),
-        0
-    );
-    let invalid_roots: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM coordination_roots r WHERE published_revision>committed_revision \
-         OR (committed_revision>0 AND (SELECT COUNT(*) FROM coordination_events e \
-         WHERE e.root_thread_id=r.root_thread_id)!=committed_revision) \
-         OR (committed_revision>0 AND (SELECT MIN(revision) FROM coordination_events e \
-         WHERE e.root_thread_id=r.root_thread_id)!=1) \
-         OR (committed_revision>0 AND (SELECT MAX(revision) FROM coordination_events e \
-         WHERE e.root_thread_id=r.root_thread_id)!=committed_revision)",
-    )
-    .fetch_one(&*runtime.pool)
-    .await?;
-    assert_eq!(invalid_roots, 0);
-    let journal_mismatch: i64 = sqlx::query_scalar(
-        "SELECT (SELECT COUNT(*) FROM coordination_events e LEFT JOIN \
-         coordination_projection_outbox o USING(event_id) WHERE o.event_id IS NULL) + \
-         (SELECT COUNT(*) FROM coordination_projection_outbox o LEFT JOIN \
-         coordination_events e USING(event_id) WHERE e.event_id IS NULL)",
-    )
-    .fetch_one(&*runtime.pool)
-    .await?;
-    assert_eq!(journal_mismatch, 0);
-    Ok(())
+fn freeze_row(
+    table: &str,
+    columns: &[String],
+    row: &sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<Vec<FrozenCell>> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let raw = row.try_get_raw(index)?;
+            if raw.is_null() {
+                return Ok(FrozenCell::Null);
+            }
+            let cell = match raw.type_info().name() {
+                "INTEGER" => FrozenCell::Integer(row.try_get(index)?),
+                "REAL" => FrozenCell::RealBits(row.try_get::<f64, _>(index)?.to_bits()),
+                "TEXT" => FrozenCell::Text(RedactedText(row.try_get(index)?)),
+                "BLOB" => {
+                    let bytes: Vec<u8> = row.try_get(index)?;
+                    if column == "ciphertext"
+                        && matches!(table, "coordination_commands" | "coordination_inbox")
+                    {
+                        FrozenCell::Ciphertext(OpaqueCiphertext {
+                            len: bytes.len(),
+                            digest: Sha256::digest(bytes.as_slice()).into(),
+                        })
+                    } else {
+                        FrozenCell::Blob(RedactedBytes(bytes))
+                    }
+                }
+                kind => anyhow::bail!("unsupported sqlite value kind {kind} in {table}.{column}"),
+            };
+            Ok(cell)
+        })
+        .collect()
+}
+
+async fn freeze_marker(sqlite_home: &Path) -> anyhow::Result<FrozenMarker> {
+    let path = sqlite_home.join(super::authority_marker::MARKER_FILE_NAME);
+    let metadata = match tokio::fs::symlink_metadata(path.as_path()).await {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(FrozenMarker::Missing),
+        Err(err) => return Err(err.into()),
+    };
+    let kind = entry_kind(metadata.file_type());
+    let contents = if !metadata.is_file() {
+        FrozenMarkerContents::NotRegular
+    } else if metadata.len() > super::authority_marker::MAX_MARKER_BYTES {
+        FrozenMarkerContents::Oversized {
+            len: metadata.len(),
+        }
+    } else {
+        let file = tokio::fs::File::open(path).await?;
+        let mut bytes = Vec::new();
+        file.take(super::authority_marker::MAX_MARKER_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 > super::authority_marker::MAX_MARKER_BYTES {
+            FrozenMarkerContents::Oversized {
+                len: bytes.len() as u64,
+            }
+        } else {
+            FrozenMarkerContents::Bounded(RedactedBytes(bytes))
+        }
+    };
+    Ok(FrozenMarker::Entry { kind, contents })
+}
+
+async fn freeze_directory(sqlite_home: &Path) -> anyhow::Result<Vec<FrozenDirectoryEntry>> {
+    let mut reader = tokio::fs::read_dir(sqlite_home).await?;
+    let mut entries = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+        entries.push(FrozenDirectoryEntry {
+            name: RedactedOsString(entry.file_name()),
+            kind: entry_kind(metadata.file_type()),
+        });
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn entry_kind(file_type: std::fs::FileType) -> FrozenEntryKind {
+    if file_type.is_file() {
+        FrozenEntryKind::File
+    } else if file_type.is_dir() {
+        FrozenEntryKind::Directory
+    } else if file_type.is_symlink() {
+        FrozenEntryKind::Symlink
+    } else {
+        FrozenEntryKind::Other
+    }
 }

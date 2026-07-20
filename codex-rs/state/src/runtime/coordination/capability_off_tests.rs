@@ -8,6 +8,7 @@ use super::degradation::record_exogenous_terminal_degradation;
 use super::failure_injection_support::Boundary;
 use super::failure_injection_support::CrashInjector;
 use super::failure_injection_support::CrashPoint;
+use super::failure_injection_support::FrozenStateInputs;
 use super::failure_injection_support::assert_integrity;
 use super::failure_injection_support::frozen_state;
 use super::failure_injection_tests::delivery_now;
@@ -68,6 +69,14 @@ async fn response_loss_cannot_authorize_a_controlled_effect_before_reopen_and_re
             .await?;
     assert_eq!(durable_receipts, 1);
     assert_eq!(sink.calls(), 0);
+    let before_effect = frozen_state(
+        &reopened,
+        FrozenStateInputs {
+            sqlite_home: reopened.codex_home(),
+            controlled_effect_count: sink.calls(),
+        },
+    )
+    .await?;
     assert!(matches!(
         reopened
             .persist_coordination_recipient_receipt(receipt_params_for_matrix())
@@ -76,6 +85,17 @@ async fn response_loss_cannot_authorize_a_controlled_effect_before_reopen_and_re
     ));
     sink.invoke_after_verified_receipt(durable_receipts);
     assert_eq!(sink.calls(), 1);
+    let after_effect = frozen_state(
+        &reopened,
+        FrozenStateInputs {
+            sqlite_home: reopened.codex_home(),
+            controlled_effect_count: sink.calls(),
+        },
+    )
+    .await?;
+    assert_eq!(before_effect.controlled_effect_count, 0);
+    assert_eq!(after_effect.controlled_effect_count, 1);
+    assert_eq!(before_effect.tables, after_effect.tables);
     assert_integrity(&reopened).await?;
     Ok(())
 }
@@ -92,7 +112,7 @@ async fn pending_outboxes_remain_unpublished_across_restart_and_clock_advance() 
         record_exogenous_terminal_degradation(&runtime.pool, observation(epoch)?).await?,
         RecordExogenousTerminalOutcome::Applied(_)
     ));
-    let before = frozen_state(&runtime).await?;
+    let before = frozen_state(&runtime, FrozenStateInputs::new(runtime.codex_home())).await?;
     let before_entries = directory_entries(&home).await?;
     assert_pending_and_unpublished(&runtime).await?;
 
@@ -101,7 +121,10 @@ async fn pending_outboxes_remain_unpublished_across_restart_and_clock_advance() 
     for advance_ms in [1, 86_400_000, 7 * 86_400_000] {
         clock.advance(advance_ms);
         let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
-        assert_eq!(frozen_state(&reopened).await?, before);
+        assert_eq!(
+            frozen_state(&reopened, FrozenStateInputs::new(reopened.codex_home()),).await?,
+            before
+        );
         assert_pending_and_unpublished(&reopened).await?;
         assert_eq!(tokio::fs::read(&sentinel_path).await?, sentinel);
         assert_eq!(directory_entries(&home).await?, before_entries);

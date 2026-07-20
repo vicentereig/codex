@@ -48,6 +48,10 @@ fn committed_response_loss(point: CrashPoint) -> bool {
     )
 }
 
+async fn snapshot(runtime: &StateRuntime) -> anyhow::Result<FrozenCoordinationState> {
+    frozen_state(runtime, FrozenStateInputs::new(runtime.codex_home())).await
+}
+
 #[tokio::test]
 async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyhow::Result<()> {
     let recorder = CrashInjector::recording(NOW_MS);
@@ -72,7 +76,7 @@ async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyh
     for point in trace {
         let home = unique_temp_dir();
         let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
-        let before = frozen_state(&runtime).await?;
+        let before = snapshot(&runtime).await?;
         let injector = CrashInjector::fail_at(point, NOW_MS);
         assert!(
             runtime
@@ -84,23 +88,23 @@ async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyh
         drop(runtime);
         let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
         if committed_response_loss(point) {
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             assert!(matches!(
                 reopened
                     .record_coordination_command_intent(assignment_command())
                     .await?,
                 RecordCoordinationCommandOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
         } else {
-            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, before, "{point:?}");
             assert!(matches!(
                 reopened
                     .record_coordination_command_intent(assignment_command())
                     .await?,
                 RecordCoordinationCommandOutcome::Applied(_)
             ));
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             drop(reopened);
             let reopened = StateRuntime::init(home, "test".to_string()).await?;
             assert!(matches!(
@@ -109,7 +113,7 @@ async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyh
                     .await?,
                 RecordCoordinationCommandOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
             assert_integrity(&reopened).await?;
             continue;
         }
@@ -165,7 +169,7 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
         let home = unique_temp_dir();
         let runtime = runtime_with_command_at(home.clone()).await?;
         let now_ms = delivery_now(&runtime).await?;
-        let before = frozen_state(&runtime).await?;
+        let before = snapshot(&runtime).await?;
         let injector = CrashInjector::fail_at(point, now_ms);
         assert!(
             runtime
@@ -180,23 +184,23 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
         drop(runtime);
         let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
         if committed_response_loss(point) {
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             assert!(matches!(
                 reopened
                     .persist_coordination_recipient_receipt(receipt_params_for_matrix())
                     .await?,
                 PersistRecipientReceiptOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
         } else {
-            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, before, "{point:?}");
             assert!(matches!(
                 reopened
                     .persist_coordination_recipient_receipt(receipt_params_for_matrix())
                     .await?,
                 PersistRecipientReceiptOutcome::Applied(_)
             ));
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             drop(reopened);
             let reopened = StateRuntime::init(home, "test".to_string()).await?;
             assert!(matches!(
@@ -205,7 +209,7 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
                     .await?,
                 PersistRecipientReceiptOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
             assert_integrity(&reopened).await?;
             continue;
         }
@@ -254,7 +258,7 @@ async fn degradation_trace_reopens_atomically_and_replays_one_pair() -> anyhow::
     for point in trace {
         let home = unique_temp_dir();
         let (runtime, epoch) = runtime_with_root_at(home.clone()).await?;
-        let before = frozen_state(&runtime).await?;
+        let before = snapshot(&runtime).await?;
         let evidence = observation(epoch)?;
         assert!(
             record_exogenous_terminal_degradation_with(
@@ -269,24 +273,24 @@ async fn degradation_trace_reopens_atomically_and_replays_one_pair() -> anyhow::
         drop(runtime);
         let reopened = StateRuntime::init(home, "test".to_string()).await?;
         if committed_response_loss(point) {
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             assert!(matches!(
                 record_exogenous_terminal_degradation(&reopened.pool, evidence).await?,
                 RecordExogenousTerminalOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed);
+            assert_eq!(snapshot(&reopened).await?, committed);
         } else {
-            assert_eq!(frozen_state(&reopened).await?, before, "{point:?}");
+            assert_eq!(snapshot(&reopened).await?, before, "{point:?}");
             assert!(matches!(
                 record_exogenous_terminal_degradation(&reopened.pool, evidence.clone()).await?,
                 RecordExogenousTerminalOutcome::Applied(_)
             ));
-            let committed = frozen_state(&reopened).await?;
+            let committed = snapshot(&reopened).await?;
             assert!(matches!(
                 record_exogenous_terminal_degradation(&reopened.pool, evidence).await?,
                 RecordExogenousTerminalOutcome::Duplicate(_)
             ));
-            assert_eq!(frozen_state(&reopened).await?, committed);
+            assert_eq!(snapshot(&reopened).await?, committed);
         }
         assert_integrity(&reopened).await?;
     }
