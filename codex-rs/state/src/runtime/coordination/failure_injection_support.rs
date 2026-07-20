@@ -151,6 +151,20 @@ impl<'a> FrozenStateInputs<'a> {
     }
 }
 
+pub(super) async fn copy_closed_home(source: &Path, target: &Path) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(target).await?;
+    let mut entries = tokio::fs::read_dir(source).await?;
+    let mut copied = 0;
+    while let Some(entry) = entries.next_entry().await? {
+        if copied == 8 || !entry.file_type().await?.is_file() {
+            anyhow::bail!("unexpected non-file state entry");
+        }
+        tokio::fs::copy(entry.path(), target.join(entry.file_name())).await?;
+        copied += 1;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct FrozenTable {
     pub(super) name: String,

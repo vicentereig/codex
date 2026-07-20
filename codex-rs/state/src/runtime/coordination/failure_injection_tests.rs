@@ -6,11 +6,15 @@ use pretty_assertions::assert_eq;
 use sqlx::Row;
 
 use super::aggregate_journal::AggregateStep;
+use super::commands::CommandStep;
+use super::commands::CommandWriteError;
 use super::commands_tests::assignment_command;
 use super::degradation::record_exogenous_terminal_degradation;
 use super::degradation::record_exogenous_terminal_degradation_with;
 use super::failure_injection_support::*;
 use super::inbox_test_support::*;
+use super::inbox::InboxStep;
+use super::inbox::InboxWriteError;
 use super::recovery::RecoveryStep;
 use super::recovery::RecoveryWriteError;
 use super::recovery_test_support::CHILD;
@@ -73,46 +77,81 @@ async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyh
     }));
     assert!(trace.iter().any(|point| committed_response_loss(*point)));
 
-    for point in trace {
+    for (index, point) in trace.iter().copied().enumerate() {
         let home = unique_temp_dir();
         let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
         let before = snapshot(&runtime).await?;
+        runtime.close().await;
+        drop(runtime);
+        let control_home = unique_temp_dir();
+        copy_closed_home(&home, &control_home).await?;
+        let control = StateRuntime::init(control_home, "test".to_string()).await?;
+        let control_clock = CrashInjector::recording(NOW_MS);
+        let RecordCoordinationCommandOutcome::Applied(expected) = control
+            .record_coordination_command_intent_with(assignment_command(), &control_clock)
+            .await?
+        else {
+            anyhow::bail!("control command should apply");
+        };
+        let expected_committed = snapshot(&control).await?;
+        control.close().await;
+        drop(control);
+
+        let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
         let injector = CrashInjector::fail_at(point, NOW_MS);
         assert!(
-            runtime
-                .record_coordination_command_intent_with(assignment_command(), &injector)
-                .await
-                .is_err(),
+            matches!(
+                runtime
+                    .record_coordination_command_intent_with(assignment_command(), &injector)
+                    .await,
+                Err(CommandWriteError::Internal(_))
+            ),
             "{point:?}"
+        );
+        assert_owned_rollback_trace(
+            &injector,
+            &trace,
+            index,
+            Boundary::Command(CommandStep::Rollback),
         );
         drop(runtime);
         let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
         if committed_response_loss(point) {
-            let committed = snapshot(&reopened).await?;
-            assert!(matches!(
+            assert_eq!(snapshot(&reopened).await?, expected_committed, "{point:?}");
+            assert_eq!(
                 reopened
-                    .record_coordination_command_intent(assignment_command())
+                    .record_coordination_command_intent_with(
+                        assignment_command(),
+                        &CrashInjector::recording(NOW_MS),
+                    )
                     .await?,
-                RecordCoordinationCommandOutcome::Duplicate(_)
-            ));
-            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
+                RecordCoordinationCommandOutcome::Duplicate(expected),
+                "{point:?}"
+            );
+            assert_eq!(snapshot(&reopened).await?, expected_committed, "{point:?}");
         } else {
             assert_eq!(snapshot(&reopened).await?, before, "{point:?}");
-            assert!(matches!(
+            assert_eq!(
                 reopened
-                    .record_coordination_command_intent(assignment_command())
+                    .record_coordination_command_intent_with(
+                        assignment_command(),
+                        &CrashInjector::recording(NOW_MS),
+                    )
                     .await?,
-                RecordCoordinationCommandOutcome::Applied(_)
-            ));
+                RecordCoordinationCommandOutcome::Applied(expected.clone()),
+                "{point:?}"
+            );
             let committed = snapshot(&reopened).await?;
+            assert_eq!(committed, expected_committed, "{point:?}");
             drop(reopened);
             let reopened = StateRuntime::init(home, "test".to_string()).await?;
-            assert!(matches!(
+            assert_eq!(
                 reopened
                     .record_coordination_command_intent(assignment_command())
                     .await?,
-                RecordCoordinationCommandOutcome::Duplicate(_)
-            ));
+                RecordCoordinationCommandOutcome::Duplicate(expected),
+                "{point:?}"
+            );
             assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
             assert_integrity(&reopened).await?;
             continue;
@@ -165,50 +204,88 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
             >= 3
     );
 
-    for point in trace {
+    for (index, point) in trace.iter().copied().enumerate() {
         let home = unique_temp_dir();
         let runtime = runtime_with_command_at(home.clone()).await?;
         let now_ms = delivery_now(&runtime).await?;
         let before = snapshot(&runtime).await?;
+        runtime.close().await;
+        drop(runtime);
+        let control_home = unique_temp_dir();
+        copy_closed_home(&home, &control_home).await?;
+        let control = StateRuntime::init(control_home, "test".to_string()).await?;
+        let control_clock = CrashInjector::recording(now_ms);
+        let PersistRecipientReceiptOutcome::Applied(expected) = control
+            .persist_coordination_recipient_receipt_with(
+                receipt_params_for_matrix(),
+                &control_clock,
+            )
+            .await?
+        else {
+            anyhow::bail!("control recipient receipt should apply");
+        };
+        let expected_committed = snapshot(&control).await?;
+        control.close().await;
+        drop(control);
+
+        let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
         let injector = CrashInjector::fail_at(point, now_ms);
         assert!(
-            runtime
-                .persist_coordination_recipient_receipt_with(
-                    receipt_params_for_matrix(),
-                    &injector,
-                )
-                .await
-                .is_err(),
+            matches!(
+                runtime
+                    .persist_coordination_recipient_receipt_with(
+                        receipt_params_for_matrix(),
+                        &injector,
+                    )
+                    .await,
+                Err(InboxWriteError::Internal(_))
+            ),
             "{point:?}"
+        );
+        assert_owned_rollback_trace(
+            &injector,
+            &trace,
+            index,
+            Boundary::Inbox(InboxStep::Rollback),
         );
         drop(runtime);
         let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
         if committed_response_loss(point) {
-            let committed = snapshot(&reopened).await?;
-            assert!(matches!(
+            assert_eq!(snapshot(&reopened).await?, expected_committed, "{point:?}");
+            assert_eq!(
                 reopened
-                    .persist_coordination_recipient_receipt(receipt_params_for_matrix())
+                    .persist_coordination_recipient_receipt_with(
+                        receipt_params_for_matrix(),
+                        &CrashInjector::recording(now_ms),
+                    )
                     .await?,
-                PersistRecipientReceiptOutcome::Duplicate(_)
-            ));
-            assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
+                PersistRecipientReceiptOutcome::Duplicate(expected),
+                "{point:?}"
+            );
+            assert_eq!(snapshot(&reopened).await?, expected_committed, "{point:?}");
         } else {
             assert_eq!(snapshot(&reopened).await?, before, "{point:?}");
-            assert!(matches!(
+            assert_eq!(
                 reopened
-                    .persist_coordination_recipient_receipt(receipt_params_for_matrix())
+                    .persist_coordination_recipient_receipt_with(
+                        receipt_params_for_matrix(),
+                        &CrashInjector::recording(now_ms),
+                    )
                     .await?,
-                PersistRecipientReceiptOutcome::Applied(_)
-            ));
+                PersistRecipientReceiptOutcome::Applied(expected.clone()),
+                "{point:?}"
+            );
             let committed = snapshot(&reopened).await?;
+            assert_eq!(committed, expected_committed, "{point:?}");
             drop(reopened);
             let reopened = StateRuntime::init(home, "test".to_string()).await?;
-            assert!(matches!(
+            assert_eq!(
                 reopened
                     .persist_coordination_recipient_receipt(receipt_params_for_matrix())
                     .await?,
-                PersistRecipientReceiptOutcome::Duplicate(_)
-            ));
+                PersistRecipientReceiptOutcome::Duplicate(expected),
+                "{point:?}"
+            );
             assert_eq!(snapshot(&reopened).await?, committed, "{point:?}");
             assert_integrity(&reopened).await?;
             continue;
@@ -216,6 +293,24 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
         assert_integrity(&reopened).await?;
     }
     Ok(())
+}
+
+fn assert_owned_rollback_trace(
+    injector: &CrashInjector,
+    successful_trace: &[CrashPoint],
+    failed_index: usize,
+    rollback: Boundary,
+) {
+    if committed_response_loss(successful_trace[failed_index]) {
+        assert_eq!(injector.trace(), successful_trace);
+        return;
+    }
+    let mut expected = successful_trace[..=failed_index].to_vec();
+    expected.push(CrashPoint {
+        boundary: rollback,
+        occurrence: 1,
+    });
+    assert_eq!(injector.trace(), expected);
 }
 
 pub(super) async fn delivery_now(runtime: &StateRuntime) -> anyhow::Result<i64> {

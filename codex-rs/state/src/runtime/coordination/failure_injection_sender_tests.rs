@@ -320,7 +320,7 @@ async fn run_case(case: SenderCase) -> anyhow::Result<()> {
         runtime.close().await;
         drop(runtime);
         let control_home = unique_temp_dir();
-        copy_home(&home, &control_home).await?;
+        copy_closed_home(&home, &control_home).await?;
         let control = StateRuntime::init(control_home, "test".to_string()).await?;
         let expected_output = case.invoke(&control, &input, &NoCommandFailure).await?;
         assert_success(case, &expected_output);
@@ -457,18 +457,4 @@ async fn assert_ack_unchanged(
 
 async fn snapshot(runtime: &StateRuntime) -> anyhow::Result<FrozenCoordinationState> {
     frozen_state(runtime, FrozenStateInputs::new(runtime.codex_home())).await
-}
-
-async fn copy_home(source: &std::path::Path, target: &std::path::Path) -> anyhow::Result<()> {
-    tokio::fs::create_dir_all(target).await?;
-    let mut entries = tokio::fs::read_dir(source).await?;
-    let mut copied = 0;
-    while let Some(entry) = entries.next_entry().await? {
-        if copied == 8 || !entry.file_type().await?.is_file() {
-            anyhow::bail!("unexpected non-file state entry");
-        }
-        tokio::fs::copy(entry.path(), target.join(entry.file_name())).await?;
-        copied += 1;
-    }
-    Ok(())
 }
