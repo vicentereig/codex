@@ -186,6 +186,40 @@ pub(super) enum FrozenCell {
     Ciphertext(OpaqueCiphertext),
 }
 
+/// Asserts that private bytes are absent from every frozen non-ciphertext SQLite cell.
+///
+/// Live command and inbox ciphertext intentionally remains opaque in a frozen snapshot: this
+/// helper verifies every other persisted text/blob surface without turning the crash snapshot
+/// into a payload disclosure mechanism.
+pub(super) fn assert_frozen_non_ciphertext_excludes(
+    snapshot: &FrozenCoordinationState,
+    private_values: &[&[u8]],
+) {
+    for table in &snapshot.tables {
+        for row in &table.rows {
+            for cell in row {
+                let bytes = match cell {
+                    FrozenCell::Text(value) => value.0.as_bytes(),
+                    FrozenCell::Blob(value) => value.0.as_slice(),
+                    FrozenCell::Null
+                    | FrozenCell::Integer(_)
+                    | FrozenCell::RealBits(_)
+                    | FrozenCell::Ciphertext(_) => continue,
+                };
+                for private_value in private_values {
+                    assert!(
+                        !bytes
+                            .windows(private_value.len())
+                            .any(|window| window == *private_value),
+                        "private bytes reached {} non-ciphertext frozen cell",
+                        table.name,
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[derive(Eq, PartialEq)]
 pub(super) struct RedactedText(String);
 
