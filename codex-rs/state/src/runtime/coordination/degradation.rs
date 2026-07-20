@@ -98,7 +98,7 @@ pub(super) async fn record_checked(
             observation,
         )));
     }
-    let now = chrono::Utc::now().timestamp_millis().max(0);
+    let now = injector.now_ms();
     let included = serde_json::to_vec(&observation.included_generations)
         .map_err(|_| RecoveryWriteError::CorruptState)?;
     sqlx::query(

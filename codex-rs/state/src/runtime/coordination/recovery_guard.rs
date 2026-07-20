@@ -225,7 +225,7 @@ async fn verify_marker(
          quarantine_reason='coordination authority marker changed during recovery',\
          updated_at_ms=MAX(updated_at_ms,?) WHERE singleton_id=1 AND status='active'",
     )
-    .bind(chrono::Utc::now().timestamp_millis().max(0))
+    .bind(injector.now_ms())
     .execute(&mut *connection)
     .await
     .map_err(internal)?;

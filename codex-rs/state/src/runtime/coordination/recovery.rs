@@ -69,6 +69,10 @@ pub(crate) enum RecoveryStep {
 /// Production implementations must be side-effect free and always continue.
 pub(crate) trait RecoveryFailureInjector: Send + Sync {
     fn after_recovery_step(&self, step: RecoveryStep) -> anyhow::Result<()>;
+
+    fn now_ms(&self) -> i64 {
+        chrono::Utc::now().timestamp_millis().max(0)
+    }
 }
 
 pub(super) struct NoRecoveryFailure;

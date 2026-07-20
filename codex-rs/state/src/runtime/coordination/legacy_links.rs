@@ -82,7 +82,7 @@ pub(super) async fn record_legacy_link_in_with(
         return apply_requested_suppression(connection, link, existing, injector).await;
     }
     validate_native_suppression(connection, link, injector).await?;
-    let now = chrono::Utc::now().timestamp_millis().max(0);
+    let now = injector.now_ms();
     let (suppression_id, suppressed_at_ms) = link
         .native_suppression
         .map(|suppression| {

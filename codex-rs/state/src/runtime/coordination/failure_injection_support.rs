@@ -127,6 +127,10 @@ impl RecoveryFailureInjector for CrashInjector {
     fn after_recovery_step(&self, step: RecoveryStep) -> anyhow::Result<()> {
         self.visit(Boundary::Recovery(step))
     }
+
+    fn now_ms(&self) -> i64 {
+        self.now_ms.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
