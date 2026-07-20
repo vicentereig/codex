@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use pretty_assertions::assert_eq;
 
 use super::aggregate_journal::AggregateStep;
+use super::authority_marker::MARKER_FILE_NAME;
 use super::degradation::record_exogenous_terminal_degradation;
 use super::failure_injection_support::Boundary;
 use super::failure_injection_support::CrashInjector;
@@ -17,6 +20,11 @@ use super::failure_injection_tests::receipt_params_for_matrix;
 use super::failure_injection_tests::runtime_with_command_at;
 use super::failure_injection_tests::runtime_with_root_at;
 use crate::StateRuntime;
+use crate::GOALS_DB_FILENAME;
+use crate::LOGS_DB_FILENAME;
+use crate::MEMORIES_DB_FILENAME;
+use crate::STATE_DB_FILENAME;
+use crate::THREAD_HISTORY_DB_FILENAME;
 use crate::model::coordination_inbox::PersistRecipientReceiptOutcome;
 use crate::model::coordination_recovery::RecordExogenousTerminalOutcome;
 use crate::runtime::test_support::unique_temp_dir;
@@ -113,7 +121,7 @@ async fn pending_outboxes_remain_unpublished_across_restart_and_clock_advance() 
         RecordExogenousTerminalOutcome::Applied(_)
     ));
     let before = frozen_state(&runtime, FrozenStateInputs::new(runtime.codex_home())).await?;
-    let before_entries = directory_entries(&home).await?;
+    assert_only_allowed_directory_entries(&home).await?;
     assert_pending_and_unpublished(&runtime).await?;
 
     let clock = CrashInjector::recording(1_753_000_000_000);
@@ -127,7 +135,7 @@ async fn pending_outboxes_remain_unpublished_across_restart_and_clock_advance() 
         );
         assert_pending_and_unpublished(&reopened).await?;
         assert_eq!(tokio::fs::read(&sentinel_path).await?, sentinel);
-        assert_eq!(directory_entries(&home).await?, before_entries);
+        assert_only_allowed_directory_entries(&home).await?;
         assert_integrity(&reopened).await?;
         drop(reopened);
     }
@@ -149,12 +157,50 @@ async fn assert_pending_and_unpublished(runtime: &StateRuntime) -> anyhow::Resul
     Ok(())
 }
 
-async fn directory_entries(path: &std::path::Path) -> anyhow::Result<Vec<std::ffi::OsString>> {
+async fn assert_only_allowed_directory_entries(path: &std::path::Path) -> anyhow::Result<()> {
+    let required_database_names = [
+        STATE_DB_FILENAME,
+        LOGS_DB_FILENAME,
+        GOALS_DB_FILENAME,
+        MEMORIES_DB_FILENAME,
+    ];
+    let allowed_database_names = [
+        STATE_DB_FILENAME,
+        LOGS_DB_FILENAME,
+        GOALS_DB_FILENAME,
+        MEMORIES_DB_FILENAME,
+        THREAD_HISTORY_DB_FILENAME,
+    ];
+    let required = required_database_names
+        .into_iter()
+        .chain([MARKER_FILE_NAME, "coordination-sidecar-sentinel"])
+        .map(OsString::from)
+        .collect::<BTreeSet<_>>();
+    let allowed = allowed_database_names
+        .into_iter()
+        .flat_map(|name| {
+            [
+                OsString::from(name),
+                OsString::from(format!("{name}-wal")),
+                OsString::from(format!("{name}-shm")),
+            ]
+        })
+        .chain([
+            OsString::from(MARKER_FILE_NAME),
+            OsString::from("coordination-sidecar-sentinel"),
+        ])
+        .collect::<BTreeSet<_>>();
+    let actual = directory_entries(path).await?;
+    assert!(actual.is_subset(&allowed), "unexpected sqlite-home entries: {actual:?}");
+    assert!(required.is_subset(&actual), "missing required sqlite-home entries: {actual:?}");
+    Ok(())
+}
+
+async fn directory_entries(path: &std::path::Path) -> anyhow::Result<BTreeSet<OsString>> {
     let mut entries = tokio::fs::read_dir(path).await?;
-    let mut names = Vec::new();
+    let mut names = BTreeSet::new();
     while let Some(entry) = entries.next_entry().await? {
-        names.push(entry.file_name());
+        names.insert(entry.file_name());
     }
-    names.sort();
     Ok(names)
 }
