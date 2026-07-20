@@ -1,4 +1,5 @@
 use codex_protocol::ThreadId;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Digest;
@@ -15,8 +16,9 @@ const COMPATIBILITY_NAMESPACE: Uuid = Uuid::from_u128(0x6f4a7f9e_2f75_5bf0_9af2_
 const COMPATIBILITY_PREFIX: &[u8] = b"codex-coordination-compat\0";
 const IDEMPOTENCY_PREFIX: &[u8] = b"codex-coordination-idempotency\0";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilitySourceShape {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceShape {
     CollabToolItem,
     DerivedCollabEvent,
     SubAgentActivity,
@@ -25,7 +27,7 @@ pub enum CompatibilitySourceShape {
     TurnAborted,
 }
 
-impl CompatibilitySourceShape {
+impl SourceShape {
     fn as_str(self) -> &'static str {
         match self {
             Self::CollabToolItem => "collabToolItem",
@@ -93,7 +95,7 @@ impl CoordinationSemanticSlot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompatibilitySourceIdentity {
-    shape: CompatibilitySourceShape,
+    shape: SourceShape,
     source_thread_id: Option<ThreadId>,
     source_turn_id: Option<BoundedId<MAX_ID_BYTES>>,
     source_item_id: Option<BoundedId<MAX_ID_BYTES>>,
@@ -103,7 +105,7 @@ pub struct CompatibilitySourceIdentity {
 
 impl CompatibilitySourceIdentity {
     pub fn new(
-        shape: CompatibilitySourceShape,
+        shape: SourceShape,
         source_thread_id: Option<ThreadId>,
         source_turn_id: Option<BoundedId<MAX_ID_BYTES>>,
         source_item_id: Option<BoundedId<MAX_ID_BYTES>>,

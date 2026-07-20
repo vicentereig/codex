@@ -4,6 +4,7 @@
 
 mod checked;
 mod compatibility;
+mod event;
 mod evidence;
 
 pub use checked::*;
@@ -21,3 +22,7 @@ mod compatibility_tests;
 #[cfg(test)]
 #[path = "evidence_tests.rs"]
 mod evidence_tests;
+
+#[cfg(test)]
+#[path = "event_fixture_tests.rs"]
+mod event_fixture_tests;

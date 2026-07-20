@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use crate::BoundedId;
 use crate::MAX_ID_BYTES;
+use crate::SanitizedText;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +23,30 @@ pub enum UnavailableReason {
 pub enum Evidence<T> {
     Known { value: T },
     Unavailable { reason: UnavailableReason },
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContentSource {
+    LegacyV1,
+    InternalError,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ContentEvidence {
+    Known {
+        value: SanitizedText,
+        source: ContentSource,
+    },
+    Unavailable {
+        reason: UnavailableReason,
+    },
     NotApplicable,
 }
 

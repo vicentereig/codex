@@ -31,7 +31,7 @@ fn key(slot: CoordinationSemanticSlot) -> IdempotencyKey {
 #[test]
 fn compatibility_uuid_matches_interaction_marker_vector() {
     let identity = CompatibilitySourceIdentity::new(
-        CompatibilitySourceShape::SubAgentActivity,
+        SourceShape::SubAgentActivity,
         Some(source_thread()),
         Some(bounded("turn-a")),
         Some(bounded("item-1")),
@@ -49,7 +49,7 @@ fn compatibility_uuid_matches_interaction_marker_vector() {
 #[test]
 fn compatibility_uuid_matches_absent_item_vector() {
     let identity = CompatibilitySourceIdentity::new(
-        CompatibilitySourceShape::TurnComplete,
+        SourceShape::TurnComplete,
         Some(source_thread()),
         Some(bounded("turn-a")),
         None,
@@ -68,7 +68,7 @@ fn compatibility_uuid_matches_absent_item_vector() {
 fn compatibility_ordinal_is_sqlite_safe() {
     assert!(
         CompatibilitySourceIdentity::new(
-            CompatibilitySourceShape::TurnComplete,
+            SourceShape::TurnComplete,
             None,
             None,
             None,
