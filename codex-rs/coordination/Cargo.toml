@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-coordination"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "codex_coordination"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-protocol = { workspace = true }
+codex-secrets = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v7"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

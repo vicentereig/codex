@@ -2611,6 +2611,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-coordination"
+version = "0.0.0"
+dependencies = [
+ "codex-protocol",
+ "codex-secrets",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "codex-core"
 version = "0.0.0"
 dependencies = [
