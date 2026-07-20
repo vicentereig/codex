@@ -4,13 +4,37 @@ mod aggregate_event;
 mod aggregate_journal;
 mod aggregate_queries;
 mod aggregates;
+mod assignment_recovery;
 mod authority;
 mod authority_marker;
 mod command_event;
 mod command_identity;
 mod command_leases;
+mod command_recovery;
 mod command_rows;
 mod commands;
+mod degradation;
+mod degradation_integrity;
+mod degradation_outbox;
+mod inbox;
+mod inbox_claim;
+mod inbox_maintenance;
+mod inbox_receipt;
+mod inbox_receipt_identity;
+mod inbox_recovery;
+mod inbox_rows;
+mod inclusion;
+mod inclusion_gate;
+mod inclusion_outcome;
+mod inclusion_rows;
+mod inclusion_selection;
+mod legacy_checkpoints;
+mod legacy_degradations;
+mod legacy_links;
+mod maintenance_degradation;
+mod recovery;
+mod recovery_batch;
+mod recovery_guard;
 mod reserve_transition;
 mod terminal_facts;
 mod terminal_transition;
@@ -64,3 +88,51 @@ mod command_payload_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod commands_tests;
+#[cfg(test)]
+#[path = "inbox_failure_tests.rs"]
+mod inbox_failure_tests;
+#[cfg(test)]
+#[path = "inbox_interrupt_tests.rs"]
+mod inbox_interrupt_tests;
+#[cfg(test)]
+#[path = "inbox_privacy_tests.rs"]
+mod inbox_privacy_tests;
+#[cfg(test)]
+#[path = "inbox_receipt_tests.rs"]
+mod inbox_receipt_tests;
+#[cfg(test)]
+#[path = "inbox_sql_adversarial_tests.rs"]
+mod inbox_sql_adversarial_tests;
+#[cfg(test)]
+#[path = "inbox_test_support.rs"]
+mod inbox_test_support;
+#[cfg(test)]
+#[path = "inbox_ttl_tests.rs"]
+mod inbox_ttl_tests;
+#[cfg(test)]
+#[path = "inclusion_retry_tests.rs"]
+mod inclusion_retry_tests;
+#[cfg(test)]
+#[path = "inclusion_terminal_gate_tests.rs"]
+mod inclusion_terminal_gate_tests;
+#[cfg(test)]
+#[path = "recovery_adversarial_tests.rs"]
+mod recovery_adversarial_tests;
+#[cfg(test)]
+#[path = "recovery_checkpoint_tests.rs"]
+mod recovery_checkpoint_tests;
+#[cfg(test)]
+#[path = "recovery_failure_tests.rs"]
+mod recovery_failure_tests;
+#[cfg(test)]
+#[path = "recovery_maintenance_tests.rs"]
+mod recovery_maintenance_tests;
+#[cfg(test)]
+#[path = "recovery_outbox_tests.rs"]
+mod recovery_outbox_tests;
+#[cfg(test)]
+#[path = "recovery_storage_tests.rs"]
+mod recovery_storage_tests;
+#[cfg(test)]
+#[path = "recovery_test_support.rs"]
+mod recovery_test_support;
