@@ -105,6 +105,9 @@ mod failure_injection_integrity;
 #[path = "failure_injection_integrity_tests.rs"]
 mod failure_injection_integrity_tests;
 #[cfg(test)]
+#[path = "failure_injection_sender_tests.rs"]
+mod failure_injection_sender_tests;
+#[cfg(test)]
 #[path = "failure_injection_snapshot_tests.rs"]
 mod failure_injection_snapshot_tests;
 #[cfg(test)]
