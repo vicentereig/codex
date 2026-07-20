@@ -329,17 +329,13 @@ pub(super) fn stable_output(output: &SemanticOutput) -> SemanticOutput {
             SemanticOutput::Checkpoint(AdvanceLegacyScanOutcome::Duplicate(checkpoint.clone()))
         }
         SemanticOutput::Checkpoint(AdvanceLegacyScanOutcome::SourceChanged(checkpoint)) => {
-            SemanticOutput::Checkpoint(AdvanceLegacyScanOutcome::SourceChanged(
-                checkpoint.clone(),
-            ))
+            SemanticOutput::Checkpoint(AdvanceLegacyScanOutcome::SourceChanged(checkpoint.clone()))
         }
         other => panic!("unexpected successful output: {other:?}"),
     }
 }
 
-pub(super) async fn snapshot(
-    runtime: &StateRuntime,
-) -> anyhow::Result<FrozenCoordinationState> {
+pub(super) async fn snapshot(runtime: &StateRuntime) -> anyhow::Result<FrozenCoordinationState> {
     frozen_state(runtime, FrozenStateInputs::new(runtime.codex_home())).await
 }
 
@@ -367,8 +363,10 @@ fn checkpoint_success_trace(step: RecoveryStep) -> &'static [RecoveryStep] {
     }
 }
 
-const CHECKPOINT_INSERT_TRACE: [RecoveryStep; 13] = checkpoint_trace(RecoveryStep::CheckpointInsert);
-const CHECKPOINT_UPDATE_TRACE: [RecoveryStep; 13] = checkpoint_trace(RecoveryStep::CheckpointUpdate);
+const CHECKPOINT_INSERT_TRACE: [RecoveryStep; 13] =
+    checkpoint_trace(RecoveryStep::CheckpointInsert);
+const CHECKPOINT_UPDATE_TRACE: [RecoveryStep; 13] =
+    checkpoint_trace(RecoveryStep::CheckpointUpdate);
 
 const fn checkpoint_trace(step: RecoveryStep) -> [RecoveryStep; 13] {
     use RecoveryStep as S;
@@ -410,10 +408,8 @@ fn checkpoint_page(
         } else {
             12
         };
-        let event = compatibility_event(
-            CoordinationSemanticSlot::LegacyInteractionObserved,
-            ordinal,
-        );
+        let event =
+            compatibility_event(CoordinationSemanticSlot::LegacyInteractionObserved, ordinal);
         vec![CheckedLegacyReductionDegradation::new(
             root,
             epoch,
@@ -429,14 +425,13 @@ fn checkpoint_page(
         expected_state_epoch: epoch,
         source_thread_id: root,
         expected_version: 0,
-        expected_prefix_fingerprint: existing.then_some(if matches!(
-            kind,
-            CheckpointPage::SourceChanged
-        ) {
-            [9; 32]
-        } else {
-            [1; 32]
-        }),
+        expected_prefix_fingerprint: existing.then_some(
+            if matches!(kind, CheckpointPage::SourceChanged) {
+                [9; 32]
+            } else {
+                [1; 32]
+            },
+        ),
         next_physical_ordinal: if existing { 2 } else { 1 },
         scanned_prefix_fingerprint: if existing { [2; 32] } else { [1; 32] },
         last_order: None,

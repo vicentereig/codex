@@ -110,12 +110,8 @@ impl DeliveryCase {
 
     fn rollback(self) -> Boundary {
         match self {
-            Self::MessageIntent | Self::InterruptIntent => {
-                Boundary::Command(CommandStep::Rollback)
-            }
-            Self::MessageReceipt | Self::InterruptReceipt => {
-                Boundary::Inbox(InboxStep::Rollback)
-            }
+            Self::MessageIntent | Self::InterruptIntent => Boundary::Command(CommandStep::Rollback),
+            Self::MessageReceipt | Self::InterruptReceipt => Boundary::Inbox(InboxStep::Rollback),
         }
     }
 
@@ -130,10 +126,7 @@ impl DeliveryCase {
                 point(Boundary::Aggregate(AggregateStep::IdempotencyRead), 2),
                 point(Boundary::Aggregate(AggregateStep::AggregateRead), 1),
                 point(Boundary::Aggregate(AggregateStep::AggregateRead), 2),
-                point(
-                    Boundary::Aggregate(AggregateStep::RevisionAllocation),
-                    1,
-                ),
+                point(Boundary::Aggregate(AggregateStep::RevisionAllocation), 1),
                 point(Boundary::Aggregate(AggregateStep::EventInsert), 1),
                 point(Boundary::Aggregate(AggregateStep::OutboxInsert), 1),
                 point(Boundary::Command(CommandStep::TargetCapture), 1),
@@ -149,10 +142,7 @@ impl DeliveryCase {
                 point(Boundary::Aggregate(AggregateStep::AuthorityRead), 2),
                 point(Boundary::Aggregate(AggregateStep::AggregateRead), 1),
                 point(Boundary::Aggregate(AggregateStep::AggregateRead), 2),
-                point(
-                    Boundary::Aggregate(AggregateStep::RevisionAllocation),
-                    1,
-                ),
+                point(Boundary::Aggregate(AggregateStep::RevisionAllocation), 1),
                 point(Boundary::Aggregate(AggregateStep::EventInsert), 1),
                 point(Boundary::Aggregate(AggregateStep::OutboxInsert), 1),
                 point(Boundary::Inbox(InboxStep::ReceiptEvent), 1),
@@ -171,9 +161,7 @@ impl DeliveryCase {
                 ))
             }
             DeliveryOutput::Receipt(PersistRecipientReceiptOutcome::Applied(metadata)) => {
-                DeliveryOutput::Receipt(PersistRecipientReceiptOutcome::Duplicate(
-                    metadata.clone(),
-                ))
+                DeliveryOutput::Receipt(PersistRecipientReceiptOutcome::Duplicate(metadata.clone()))
             }
             DeliveryOutput::Intent(RecordCoordinationCommandOutcome::Duplicate(_))
             | DeliveryOutput::Receipt(

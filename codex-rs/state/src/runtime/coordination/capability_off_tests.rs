@@ -19,11 +19,11 @@ use super::failure_injection_tests::observation;
 use super::failure_injection_tests::receipt_params_for_matrix;
 use super::failure_injection_tests::runtime_with_command_at;
 use super::failure_injection_tests::runtime_with_root_at;
-use crate::StateRuntime;
 use crate::GOALS_DB_FILENAME;
 use crate::LOGS_DB_FILENAME;
 use crate::MEMORIES_DB_FILENAME;
 use crate::STATE_DB_FILENAME;
+use crate::StateRuntime;
 use crate::THREAD_HISTORY_DB_FILENAME;
 use crate::model::coordination_inbox::PersistRecipientReceiptOutcome;
 use crate::model::coordination_recovery::RecordExogenousTerminalOutcome;
@@ -191,8 +191,14 @@ async fn assert_only_allowed_directory_entries(path: &std::path::Path) -> anyhow
         ])
         .collect::<BTreeSet<_>>();
     let actual = directory_entries(path).await?;
-    assert!(actual.is_subset(&allowed), "unexpected sqlite-home entries: {actual:?}");
-    assert!(required.is_subset(&actual), "missing required sqlite-home entries: {actual:?}");
+    assert!(
+        actual.is_subset(&allowed),
+        "unexpected sqlite-home entries: {actual:?}"
+    );
+    assert!(
+        required.is_subset(&actual),
+        "missing required sqlite-home entries: {actual:?}"
+    );
     Ok(())
 }
 

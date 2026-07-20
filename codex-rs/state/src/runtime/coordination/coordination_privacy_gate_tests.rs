@@ -332,7 +332,7 @@ async fn exercise_recovery_storage_surfaces(runtime: &crate::StateRuntime) -> an
         resolution,
         ResolveDegradationPublicationOutcome::Applied(_)
     ));
-    let frozen = frozen_state(&runtime, FrozenStateInputs::new(runtime.codex_home())).await?;
+    let frozen = frozen_state(runtime, FrozenStateInputs::new(runtime.codex_home())).await?;
     assert_private(
         &frozen,
         &[PLAINTEXT_LOOKING_SENTINEL, ENCODED_CIPHERTEXT_SENTINEL],
