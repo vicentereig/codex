@@ -213,8 +213,7 @@ impl IdempotencyRecord {
         key: IdempotencyKey,
         content: &T,
     ) -> Result<Self, CoordinationError> {
-        let canonical_content = canonical_json(serde_json::to_value(content)?);
-        let content_fingerprint = sha256(&serde_json::to_vec(&canonical_content)?);
+        let content_fingerprint = sha256(&canonical_json_bytes(content)?);
         Ok(Self {
             key,
             content_fingerprint,
@@ -265,6 +264,12 @@ pub enum IdempotencyConflict {
         existing_content_fingerprint: [u8; 32],
         incoming_content_fingerprint: [u8; 32],
     },
+}
+
+pub(crate) fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CoordinationError> {
+    Ok(serde_json::to_vec(&canonical_json(serde_json::to_value(
+        value,
+    )?))?)
 }
 
 fn canonical_json(value: Value) -> Value {

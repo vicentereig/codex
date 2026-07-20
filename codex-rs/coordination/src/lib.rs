@@ -5,10 +5,13 @@
 mod checked;
 mod compatibility;
 mod event;
+mod event_invariants;
 mod evidence;
 
 pub use checked::*;
 pub use compatibility::*;
+pub use event::*;
+pub use event_invariants::CoordinationEvent;
 pub use evidence::*;
 
 #[cfg(test)]

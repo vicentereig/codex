@@ -373,13 +373,9 @@ pub struct CoordinationEventEnvelope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EventData {
+pub(crate) struct EventData {
     #[serde(flatten)]
-    envelope: CoordinationEventEnvelope,
+    pub(crate) envelope: CoordinationEventEnvelope,
     #[serde(flatten)]
-    kind: CoordinationEventKind,
+    pub(crate) kind: CoordinationEventKind,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CoordinationEvent(EventData);
