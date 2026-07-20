@@ -119,10 +119,47 @@ impl DeliveryCase {
         }
     }
 
-    fn crash_point_count(self) -> usize {
+    fn expected_trace(self) -> Vec<CrashPoint> {
         match self {
-            Self::MessageIntent | Self::InterruptIntent => 15,
-            Self::MessageReceipt | Self::InterruptReceipt => 14,
+            Self::MessageIntent | Self::InterruptIntent => vec![
+                point(Boundary::Command(CommandStep::TransactionBegin), 1),
+                point(Boundary::Aggregate(AggregateStep::AuthorityRead), 1),
+                point(Boundary::Command(CommandStep::IdentityRead), 1),
+                point(Boundary::Aggregate(AggregateStep::AuthorityRead), 2),
+                point(Boundary::Aggregate(AggregateStep::IdempotencyRead), 1),
+                point(Boundary::Aggregate(AggregateStep::IdempotencyRead), 2),
+                point(Boundary::Aggregate(AggregateStep::AggregateRead), 1),
+                point(Boundary::Aggregate(AggregateStep::AggregateRead), 2),
+                point(
+                    Boundary::Aggregate(AggregateStep::RevisionAllocation),
+                    1,
+                ),
+                point(Boundary::Aggregate(AggregateStep::EventInsert), 1),
+                point(Boundary::Aggregate(AggregateStep::OutboxInsert), 1),
+                point(Boundary::Command(CommandStep::TargetCapture), 1),
+                point(Boundary::Command(CommandStep::CommandInsert), 1),
+                point(Boundary::Aggregate(AggregateStep::BeforeCommit), 1),
+                point(Boundary::Aggregate(AggregateStep::AfterCommit), 1),
+            ],
+            Self::MessageReceipt | Self::InterruptReceipt => vec![
+                point(Boundary::Inbox(InboxStep::TransactionBegin), 1),
+                point(Boundary::Aggregate(AggregateStep::AuthorityRead), 1),
+                point(Boundary::Inbox(InboxStep::CommandRead), 1),
+                point(Boundary::Inbox(InboxStep::TargetFence), 1),
+                point(Boundary::Aggregate(AggregateStep::AuthorityRead), 2),
+                point(Boundary::Aggregate(AggregateStep::AggregateRead), 1),
+                point(Boundary::Aggregate(AggregateStep::AggregateRead), 2),
+                point(
+                    Boundary::Aggregate(AggregateStep::RevisionAllocation),
+                    1,
+                ),
+                point(Boundary::Aggregate(AggregateStep::EventInsert), 1),
+                point(Boundary::Aggregate(AggregateStep::OutboxInsert), 1),
+                point(Boundary::Inbox(InboxStep::ReceiptEvent), 1),
+                point(Boundary::Inbox(InboxStep::ReceiptInsert), 1),
+                point(Boundary::Aggregate(AggregateStep::BeforeCommit), 1),
+                point(Boundary::Aggregate(AggregateStep::AfterCommit), 1),
+            ],
         }
     }
 
@@ -164,8 +201,7 @@ async fn run_case(case: DeliveryCase) -> anyhow::Result<()> {
         .map_err(delivery_error)?;
     assert_applied(case, &reference_output);
     let expected_trace = recorder.trace();
-    assert_eq!(expected_trace.len(), case.crash_point_count(), "{case:?}");
-    assert_trace_shape(case, &expected_trace);
+    assert_eq!(expected_trace, case.expected_trace(), "{case:?}");
     assert_integrity(&reference).await?;
     reference.close().await;
     drop(reference);
@@ -279,21 +315,11 @@ fn assert_internal(error: DeliveryError, case: DeliveryCase, point: CrashPoint) 
     );
 }
 
-fn assert_trace_shape(case: DeliveryCase, trace: &[CrashPoint]) {
-    let begin = match case {
-        DeliveryCase::MessageIntent | DeliveryCase::InterruptIntent => {
-            Boundary::Command(CommandStep::TransactionBegin)
-        }
-        DeliveryCase::MessageReceipt | DeliveryCase::InterruptReceipt => {
-            Boundary::Inbox(InboxStep::TransactionBegin)
-        }
-    };
-    assert_eq!(trace.first().map(|point| point.boundary), Some(begin));
-    assert_eq!(
-        trace.last().map(|point| point.boundary),
-        Some(Boundary::Aggregate(AggregateStep::AfterCommit))
-    );
-    assert!(!trace.iter().any(|point| point.boundary == case.rollback()));
+fn point(boundary: Boundary, occurrence: usize) -> CrashPoint {
+    CrashPoint {
+        boundary,
+        occurrence,
+    }
 }
 
 fn delivery_error(error: DeliveryError) -> anyhow::Error {
