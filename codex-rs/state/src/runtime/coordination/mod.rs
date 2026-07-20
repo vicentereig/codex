@@ -93,6 +93,12 @@ mod command_payload_tests;
 #[path = "commands_tests.rs"]
 mod commands_tests;
 #[cfg(test)]
+#[path = "failure_injection_aggregate_matrix_support.rs"]
+mod failure_injection_aggregate_matrix_support;
+#[cfg(test)]
+#[path = "failure_injection_aggregate_matrix_tests.rs"]
+mod failure_injection_aggregate_matrix_tests;
+#[cfg(test)]
 #[path = "failure_injection_counter_integrity.rs"]
 mod failure_injection_counter_integrity;
 #[cfg(test)]
