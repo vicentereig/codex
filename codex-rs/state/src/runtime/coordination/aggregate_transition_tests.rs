@@ -15,6 +15,13 @@ use super::aggregate_journal::CoordinationWriteError;
 use super::aggregate_test_support::*;
 use super::aggregates::AssignmentTransitionOutcome;
 use super::aggregates::ReserveAssignmentOutcome;
+use super::inbox_test_support::FOLLOWUP_OPERATION;
+use super::inbox_test_support::RECEIPT_TWO;
+use super::inbox_test_support::followup_command;
+use super::inbox_test_support::persist_assignment_inclusion;
+use super::inbox_test_support::persist_initial_assignment_inclusion;
+use super::inbox_test_support::receipt_params;
+use super::inbox_test_support::runtime_with_assignment_command;
 use crate::StateRuntime;
 use crate::model::coordination::AcceptAssignment;
 use crate::model::coordination::AssignmentReservation;
@@ -57,7 +64,7 @@ async fn terminal_rejects_reserved_unbound_target_generation() -> anyhow::Result
 }
 
 #[tokio::test]
-async fn interrupted_terminal_accepts_zero_cause_variants_but_rejects_requested()
+async fn interrupted_terminal_accepts_zero_cause_variants_but_requires_requested_receipt()
 -> anyhow::Result<()> {
     let interrupted = |reason, event, operation| -> anyhow::Result<TerminalAssignment> {
         Ok(TerminalAssignment {
@@ -113,7 +120,7 @@ async fn interrupted_terminal_accepts_zero_cause_variants_but_rejects_requested(
                 "019f7c6c-1111-7000-8000-000000000138",
             )?)
             .await,
-        Err(CoordinationWriteError::AssignmentConflict)
+        Err(CoordinationWriteError::GenerationFenced)
     ));
     Ok(())
 }
@@ -121,10 +128,7 @@ async fn interrupted_terminal_accepts_zero_cause_variants_but_rejects_requested(
 #[tokio::test]
 async fn accepted_followup_wait_and_terminal_bundles_preserve_closed_generations()
 -> anyhow::Result<()> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test".to_string()).await?;
-    runtime
-        .reserve_coordination_assignment(reserve_params())
-        .await?;
+    let runtime = runtime_with_assignment_command().await?;
     let assignment_id = AssignmentId::parse(ASSIGNMENT)?;
     let receipt_one = ReceiptId::parse("019f7c6c-1111-7000-8000-000000000201")?;
     let accept_one = AcceptAssignment {
@@ -146,36 +150,27 @@ async fn accepted_followup_wait_and_terminal_bundles_preserve_closed_generations
         expected_owner_turn_id: turn("turn-a"),
         expected_head_version: 0,
     };
+    persist_initial_assignment_inclusion(&runtime).await?;
     assert!(matches!(
         runtime
             .accept_coordination_assignment(accept_one.clone())
             .await?,
-        AssignmentTransitionOutcome::Applied { .. }
+        AssignmentTransitionOutcome::Duplicate { .. }
     ));
     assert!(matches!(
         runtime.accept_coordination_assignment(accept_one).await?,
         AssignmentTransitionOutcome::Duplicate { .. }
     ));
 
-    let follow_operation = "019f7c6c-1111-7000-8000-000000000102";
-    let mut followup = reserve_params();
-    followup.context = context(
-        CoordinationSemanticSlot::AssignmentRequested,
-        "019f7c6c-1111-7000-8000-000000000703",
-        follow_operation,
-        false,
-        2,
-        Vec::new(),
-    );
-    followup.operation_id = CoordinationOperationId::parse(follow_operation)?;
-    followup.reservation = AssignmentReservation::Followup {
-        expected_owner_thread_id: thread(ROOT),
-        expected_owner_turn_id: turn("turn-a"),
-        expected_head_version: 1,
-    };
-    let generation_two = match runtime.reserve_coordination_assignment(followup).await? {
-        ReserveAssignmentOutcome::Reserved { generation, .. } => generation,
-        other => panic!("expected follow-up reservation, got {other:?}"),
+    let follow_operation = FOLLOWUP_OPERATION;
+    let generation_two = match runtime
+        .record_coordination_command_intent(followup_command(2))
+        .await?
+    {
+        crate::model::coordination_commands::RecordCoordinationCommandOutcome::Applied(
+            metadata,
+        ) => metadata.target.generation,
+        other => panic!("expected follow-up command, got {other:?}"),
     };
     assert_eq!(generation_two, generation(2));
     assert_eq!(generation_two, generation(2));
@@ -202,11 +197,28 @@ async fn accepted_followup_wait_and_terminal_bundles_preserve_closed_generations
         expected_owner_turn_id: turn("turn-a"),
         expected_head_version: 2,
     };
+    persist_assignment_inclusion(
+        &runtime,
+        receipt_params(
+            FOLLOWUP_OPERATION,
+            RECEIPT_TWO,
+            "019f7c6c-1111-7000-8000-000000000704",
+            3,
+            2,
+            vec![(
+                CoordinationSemanticSlot::AssignmentGenerationClosed,
+                "019f7c6c-1111-7000-8000-000000000705",
+                "019f7c6c-1111-7000-8000-000000000106",
+            )],
+        ),
+        "assignment-attempt-g2",
+    )
+    .await?;
     let accepted = runtime
         .accept_coordination_assignment(accept_two.clone())
         .await?;
     assert!(
-        matches!(accepted, AssignmentTransitionOutcome::Applied { ref events } if events.len() == 2)
+        matches!(accepted, AssignmentTransitionOutcome::Duplicate { ref events } if events.len() == 2)
     );
     let mut retry_without_close_identity = accept_two.clone();
     retry_without_close_identity.context.secondary =

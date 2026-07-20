@@ -9,41 +9,17 @@ use pretty_assertions::assert_eq;
 
 use super::aggregate_test_support::*;
 use super::aggregates::AssignmentTransitionOutcome;
+use super::inbox_test_support::runtime_with_assignment_inclusion;
 use crate::StateRuntime;
 use crate::model::coordination::AcceptAssignment;
 use crate::model::coordination::AssignmentReservation;
 use crate::model::coordination::TerminalAssignment;
 use crate::model::coordination::TerminalTurn;
-use crate::runtime::test_support::unique_temp_dir;
 
 pub(super) async fn accepted_one_reserved_two()
 -> anyhow::Result<(std::sync::Arc<StateRuntime>, AssignmentId, AcceptAssignment)> {
-    let runtime = StateRuntime::init(unique_temp_dir(), "test".to_string()).await?;
-    runtime
-        .reserve_coordination_assignment(reserve_params())
-        .await?;
+    let runtime = runtime_with_assignment_inclusion().await?;
     let assignment_id = AssignmentId::parse(ASSIGNMENT)?;
-    runtime
-        .accept_coordination_assignment(AcceptAssignment {
-            context: context(
-                CoordinationSemanticSlot::AssignmentAccepted,
-                "019f7c6c-1111-7000-8000-000000000720",
-                OPERATION,
-                true,
-                1,
-                Vec::new(),
-            ),
-            assignment_id,
-            generation: generation(1),
-            receipt_id: ReceiptId::parse("019f7c6c-1111-7000-8000-000000000220")?,
-            bound_turn_id: Evidence::Known {
-                value: turn("turn-b"),
-            },
-            expected_owner_thread_id: thread(ROOT),
-            expected_owner_turn_id: turn("turn-a"),
-            expected_head_version: 0,
-        })
-        .await?;
     let follow_operation = "019f7c6c-1111-7000-8000-000000000120";
     let mut followup = reserve_params();
     followup.context = context(

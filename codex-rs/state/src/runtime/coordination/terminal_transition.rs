@@ -1,9 +1,12 @@
 use codex_coordination::AssignmentEvidence;
 use codex_coordination::AssignmentGeneration;
+use codex_coordination::BoundedId;
 use codex_coordination::CoordinationEvent;
 use codex_coordination::CoordinationEventKind;
 use codex_coordination::CoordinationSemanticSlot;
 use codex_coordination::GenerationCloseReason;
+use codex_coordination::InterruptionReason;
+use codex_coordination::MAX_ID_BYTES;
 use sqlx::Row;
 use sqlx::SqliteConnection;
 
@@ -11,8 +14,17 @@ use super::accept_transitions::fence_assignment_owner;
 use super::accept_transitions::head_row;
 use super::aggregate_journal::*;
 use super::aggregates::AssignmentTransitionOutcome;
+use super::inbox::InboxWriteError;
+use super::inbox_rows::InboxPayloadAccess;
+use super::inbox_rows::StoredInbox;
+use super::inbox_rows::load_inbox_by_command;
+use super::inclusion_gate::require_terminal_inclusions;
+use super::inclusion_gate::resolve_interrupt_receipt;
 use super::terminal_facts::terminal_fields;
 use crate::model::coordination::*;
+use crate::model::coordination_commands::CommandKind;
+use crate::model::coordination_inbox::InboxLifecycle;
+use crate::model::coordination_inbox::ResolveInterruptReceipt;
 
 struct ClosePlan {
     generation: AssignmentGeneration,
@@ -69,6 +81,19 @@ pub(super) async fn terminal(
     if included.binary_search(&target_generation).is_err() {
         return Err(CoordinationWriteError::GenerationFenced);
     }
+    let interrupt_receipt = requested_interrupt_receipt(
+        connection,
+        &params,
+        assignment_id,
+        target_generation,
+        target_thread_id,
+        &target_turn_id,
+    )
+    .await?;
+    let terminal_causes = interrupt_receipt
+        .as_ref()
+        .map(|receipt| vec![&receipt.receipt_event])
+        .unwrap_or_default();
     let included_json =
         serde_json::to_string(&included.iter().map(|value| value.get()).collect::<Vec<_>>())
             .map_err(internal)?;
@@ -87,9 +112,15 @@ pub(super) async fn terminal(
             epoch,
             stored.revision,
             kind,
-            &[],
+            &terminal_causes,
             &stored.event,
         )?;
+        if interrupt_receipt.as_ref().is_some_and(|receipt| {
+            receipt.metadata.lifecycle != InboxLifecycle::Processed
+                || receipt.resolution_event_id != Some(stored.event.envelope().event_id)
+        }) {
+            return Err(CoordinationWriteError::TerminalConflict);
+        }
         let row = sqlx::query("SELECT terminal_event_id,terminal_kind,included_generations_json FROM coordination_turn_terminals WHERE root_thread_id=? AND target_thread_id=? AND target_turn_id=?")
             .bind(params.context.root_thread_id.to_string()).bind(target_thread_id.to_string()).bind(target_turn_id.as_str())
             .fetch_optional(&mut *connection).await.map_err(internal)?.ok_or(CoordinationWriteError::CorruptStoredEvent)?;
@@ -184,6 +215,21 @@ pub(super) async fn terminal(
     if existing_terminal.is_some() {
         return Err(CoordinationWriteError::TerminalConflict);
     }
+    if interrupt_receipt.as_ref().is_some_and(|receipt| {
+        receipt.metadata.lifecycle != InboxLifecycle::Received
+            || receipt.resolution_event_id.is_some()
+    }) {
+        return Err(CoordinationWriteError::TerminalConflict);
+    }
+    require_terminal_inclusions(
+        connection,
+        params.context.root_thread_id,
+        target_thread_id,
+        &target_turn_id,
+        assignment_id,
+        &included,
+    )
+    .await?;
     fence_assignment_owner(
         &params.context,
         &head,
@@ -285,7 +331,7 @@ pub(super) async fn terminal(
         epoch,
         revisions[0],
         kind,
-        &[],
+        &terminal_causes,
     )?;
     let mut events = vec![terminal.clone()];
     for (index, plan) in plans.iter().enumerate() {
@@ -366,5 +412,71 @@ pub(super) async fn terminal(
         .after_step(AggregateStep::AggregateMutation)
         .map_err(internal)?;
     journal(connection, &params.context, &events, injector).await?;
+    if let Some(receipt) = interrupt_receipt {
+        resolve_interrupt_receipt(
+            connection,
+            ResolveInterruptReceipt {
+                receipt_id: receipt.metadata.receipt_id,
+                expected_version: receipt.metadata.version,
+                terminal_event_id: terminal.envelope().event_id,
+                resolved_at_ms: now,
+            },
+            injector,
+        )
+        .await
+        .map_err(coordination_from_inbox)?;
+    }
     Ok(AssignmentTransitionOutcome::Applied { events })
+}
+
+async fn requested_interrupt_receipt(
+    connection: &mut SqliteConnection,
+    params: &TerminalAssignment,
+    assignment_id: codex_coordination::AssignmentId,
+    generation: AssignmentGeneration,
+    target_thread_id: codex_protocol::ThreadId,
+    target_turn_id: &BoundedId<MAX_ID_BYTES>,
+) -> Result<Option<StoredInbox>, CoordinationWriteError> {
+    let TerminalTurn::Interrupted {
+        interruption_reason: InterruptionReason::Requested { operation_id },
+        ..
+    } = &params.terminal
+    else {
+        return Ok(None);
+    };
+    let receipt =
+        load_inbox_by_command(connection, *operation_id, InboxPayloadAccess::MetadataOnly)
+            .await
+            .map_err(coordination_from_inbox)?
+            .ok_or(CoordinationWriteError::GenerationFenced)?;
+    if receipt.metadata.kind != CommandKind::Interrupt
+        || receipt.metadata.root_thread_id != params.context.root_thread_id
+        || receipt.metadata.recipient_thread_id != target_thread_id
+        || receipt.metadata.recipient_turn_id != *target_turn_id
+        || receipt.metadata.target_assignment_id != assignment_id
+        || receipt.metadata.target_generation != generation
+    {
+        return Err(CoordinationWriteError::GenerationFenced);
+    }
+    Ok(Some(receipt))
+}
+
+fn coordination_from_inbox(error: InboxWriteError) -> CoordinationWriteError {
+    match error {
+        InboxWriteError::Quarantined => CoordinationWriteError::Quarantined,
+        InboxWriteError::GenerationFenced
+        | InboxWriteError::TurnFenced
+        | InboxWriteError::LeaseFenced
+        | InboxWriteError::NotReady
+        | InboxWriteError::Expired => CoordinationWriteError::GenerationFenced,
+        InboxWriteError::IdempotencyCollision | InboxWriteError::IdentityConflict => {
+            CoordinationWriteError::IdentityCollision
+        }
+        InboxWriteError::IdempotencyConflict => CoordinationWriteError::IdempotencyConflict,
+        InboxWriteError::TerminalConflict => CoordinationWriteError::TerminalConflict,
+        InboxWriteError::CorruptStoredInbox => CoordinationWriteError::CorruptStoredEvent,
+        InboxWriteError::RootMissing => CoordinationWriteError::RootMismatch,
+        InboxWriteError::Input(error) => CoordinationWriteError::Internal(error.into()),
+        InboxWriteError::Internal(error) => CoordinationWriteError::Internal(error),
+    }
 }
