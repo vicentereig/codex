@@ -56,6 +56,7 @@ use tracing::warn;
 
 mod agent_jobs;
 mod backfill;
+mod coordination;
 #[cfg(test)]
 mod delegations_tests;
 mod external_agent_config_imports;
@@ -68,6 +69,7 @@ mod remote_control;
 pub(crate) mod test_support;
 mod threads;
 
+pub use coordination::CoordinationAuthorityStatus;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
@@ -77,8 +79,11 @@ pub use goals::GoalAccountingOutcome;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
 pub use memories::MemoryStore;
+pub use recovery::FreshAfterCorruption;
 pub use recovery::RuntimeDbBackup;
+pub use recovery::RuntimeDbFreshStart;
 pub use recovery::backup_runtime_db_for_fresh_start;
+pub use recovery::backup_state_db_with_fresh_start_provenance;
 pub use recovery::is_sqlite_corruption_error;
 pub use recovery::runtime_db_path_for_corruption_error;
 pub use recovery::sqlite_error_detail_is_corruption;
@@ -169,6 +174,7 @@ pub struct StateRuntime {
     memories: MemoryStore,
     thread_updated_at_millis: Arc<AtomicI64>,
     thread_recency_at_millis: Arc<AtomicI64>,
+    coordination_authority: CoordinationAuthorityStatus,
 }
 
 impl StateRuntime {
@@ -178,10 +184,27 @@ impl StateRuntime {
     /// Logs and paginated thread history live in dedicated files to reduce
     /// lock contention with the rest of the state store.
     pub async fn init(codex_home: PathBuf, default_provider: String) -> anyhow::Result<Arc<Self>> {
+        Self::init_with_recovery(codex_home, default_provider, None).await
+    }
+
+    pub async fn init_fresh_after_corruption(
+        codex_home: PathBuf,
+        default_provider: String,
+        provenance: FreshAfterCorruption,
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::init_with_recovery(codex_home, default_provider, Some(provenance)).await
+    }
+
+    async fn init_with_recovery(
+        codex_home: PathBuf,
+        default_provider: String,
+        fresh_after_corruption: Option<FreshAfterCorruption>,
+    ) -> anyhow::Result<Arc<Self>> {
         Self::init_inner(
             codex_home,
             default_provider,
             /*telemetry_override*/ None,
+            fresh_after_corruption,
         )
         .await
     }
@@ -192,13 +215,20 @@ impl StateRuntime {
         default_provider: String,
         telemetry_override: &dyn DbTelemetry,
     ) -> anyhow::Result<Arc<Self>> {
-        Self::init_inner(codex_home, default_provider, Some(telemetry_override)).await
+        Self::init_inner(
+            codex_home,
+            default_provider,
+            Some(telemetry_override),
+            /*fresh_after_corruption*/ None,
+        )
+        .await
     }
 
     async fn init_inner(
         codex_home: PathBuf,
         default_provider: String,
         telemetry_override: Option<&dyn DbTelemetry>,
+        fresh_after_corruption: Option<FreshAfterCorruption>,
     ) -> anyhow::Result<Arc<Self>> {
         let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(codex_home.clone())?);
         tokio::fs::create_dir_all(&codex_home).await?;
@@ -316,6 +346,12 @@ impl StateRuntime {
             };
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
+        let coordination_authority = coordination::initialize_authority(
+            pool.as_ref(),
+            codex_home.as_path(),
+            fresh_after_corruption,
+        )
+        .await;
         let runtime = Arc::new(Self {
             thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
@@ -325,6 +361,7 @@ impl StateRuntime {
             default_provider,
             thread_updated_at_millis: Arc::new(AtomicI64::new(thread_updated_at_millis)),
             thread_recency_at_millis: Arc::new(AtomicI64::new(thread_recency_at_millis)),
+            coordination_authority,
         });
         if let Err(err) = runtime.run_logs_startup_maintenance().await {
             warn!(
@@ -346,6 +383,10 @@ impl StateRuntime {
 
     pub fn memories(&self) -> &MemoryStore {
         &self.memories
+    }
+
+    pub fn coordination_authority(&self) -> &CoordinationAuthorityStatus {
+        &self.coordination_authority
     }
 
     /// Close all SQLite pools and wait for outstanding pool workers to exit.

@@ -5,6 +5,7 @@
 //! moves only that database file and its sidecars into a backup folder so the
 //! other databases keep their data.
 
+use codex_coordination::StateEpoch;
 use std::borrow::Cow;
 use std::path::Path;
 use std::path::PathBuf;
@@ -17,6 +18,18 @@ pub struct RuntimeDbBackup {
     pub original_path: PathBuf,
     /// Path where the runtime database or sidecar was backed up.
     pub backup_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreshAfterCorruption {
+    pub(crate) state_epoch: StateEpoch,
+}
+
+#[derive(Debug)]
+pub struct RuntimeDbFreshStart {
+    pub backups: Vec<RuntimeDbBackup>,
+    /// Present when the primary database or one of its SQLite sidecars was backed up.
+    pub provenance: Option<FreshAfterCorruption>,
 }
 
 #[derive(Debug)]
@@ -89,6 +102,24 @@ pub async fn backup_runtime_db_for_fresh_start(
         }
         Err(err) => Err(err),
     }
+}
+
+pub async fn backup_state_db_with_fresh_start_provenance(
+    db_path: &Path,
+) -> std::io::Result<RuntimeDbFreshStart> {
+    let sqlite_home = db_path.parent().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "database path does not have a parent directory: {}",
+            db_path.display()
+        ))
+    })?;
+    let state_epoch =
+        super::coordination::prepare_fresh_after_corruption_marker(sqlite_home).await?;
+    let backups = backup_runtime_db_for_fresh_start(db_path).await?;
+    Ok(RuntimeDbFreshStart {
+        backups,
+        provenance: Some(FreshAfterCorruption { state_epoch }),
+    })
 }
 
 pub fn runtime_db_path_for_corruption_error(err: &anyhow::Error) -> Option<PathBuf> {

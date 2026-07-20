@@ -23,6 +23,9 @@ pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
+pub use runtime::CoordinationAuthorityStatus;
+pub use runtime::FreshAfterCorruption;
+pub use runtime::RuntimeDbFreshStart;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
 pub use sqlite::SqliteConfig;
@@ -77,6 +80,7 @@ pub use runtime::RuntimeDbBackup;
 pub use runtime::RuntimeDbPath;
 pub use runtime::ThreadFilterOptions;
 pub use runtime::backup_runtime_db_for_fresh_start;
+pub use runtime::backup_state_db_with_fresh_start_provenance;
 pub use runtime::goals_db_filename;
 pub use runtime::goals_db_path;
 pub use runtime::is_sqlite_corruption_error;

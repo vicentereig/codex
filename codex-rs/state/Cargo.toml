@@ -9,9 +9,11 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 codex-protocol = { workspace = true }
+codex-coordination = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 dirs = { workspace = true }
 libsqlite3-sys = { workspace = true }
+libc = { workspace = true }
 log = { workspace = true }
 owo-colors = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
