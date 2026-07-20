@@ -134,6 +134,35 @@ fn generation_and_revision_use_sqlite_safe_positive_ranges() {
 }
 
 #[test]
+fn event_numeric_scalars_enforce_frozen_wire_bounds() {
+    let version = CoordinationSchemaVersion::current();
+    assert_eq!(version.get(), 1);
+    assert_eq!(
+        serde_json::from_str::<CoordinationSchemaVersion>("1").expect("version 1"),
+        version
+    );
+    assert!(serde_json::from_str::<CoordinationSchemaVersion>("2").is_err());
+
+    let ordinal = CompatibilityOrdinal::new(i64::MAX as u64).expect("max ordinal");
+    assert_eq!(ordinal.get(), i64::MAX as u64);
+    assert_eq!(
+        serde_json::from_str::<CompatibilityOrdinal>(&ordinal.get().to_string())
+            .expect("ordinal round trip"),
+        ordinal
+    );
+    assert!(CompatibilityOrdinal::new(i64::MAX as u64 + 1).is_err());
+
+    let bytes = EncodedPayloadBytes::new(MAX_CIPHERTEXT_BYTES).expect("ciphertext cap");
+    assert_eq!(bytes.get(), MAX_CIPHERTEXT_BYTES);
+    assert_eq!(
+        serde_json::from_str::<EncodedPayloadBytes>(&bytes.get().to_string())
+            .expect("payload round trip"),
+        bytes
+    );
+    assert!(EncodedPayloadBytes::new(MAX_CIPHERTEXT_BYTES + 1).is_err());
+}
+
+#[test]
 fn bounded_lists_reject_overflow_and_inconsistent_omissions() {
     let list = BoundedList::<u8, 2>::new(vec![1, 2], 3).expect("truncated list");
     assert_eq!(

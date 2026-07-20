@@ -290,6 +290,95 @@ impl<'de> Deserialize<'de> for CoordinationRevision {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FixedVersion<const EXPECTED: u16>(u16);
+
+impl<const EXPECTED: u16> FixedVersion<EXPECTED> {
+    pub fn current() -> Self {
+        Self(EXPECTED)
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl<'de, const EXPECTED: u16> Deserialize<'de> for FixedVersion<EXPECTED> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u16::deserialize(deserializer)?;
+        if value != EXPECTED {
+            return Err(serde::de::Error::custom("unsupported coordination version"));
+        }
+        Ok(Self(value))
+    }
+}
+
+pub type CoordinationSchemaVersion = FixedVersion<1>;
+pub type CompatibilityAdapterVersion = FixedVersion<1>;
+pub type SanitizerVersion = FixedVersion<1>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CompatibilityOrdinal(u64);
+
+impl CompatibilityOrdinal {
+    pub fn new(value: u64) -> Result<Self, CoordinationError> {
+        if value > i64::MAX as u64 {
+            return Err(CoordinationError::Invalid {
+                field: "compatibilityOrdinal",
+                reason: "must be in 0..=i64::MAX",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CompatibilityOrdinal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct EncodedPayloadBytes(u32);
+
+impl EncodedPayloadBytes {
+    pub fn new(value: u32) -> Result<Self, CoordinationError> {
+        if value > MAX_CIPHERTEXT_BYTES {
+            return Err(CoordinationError::Invalid {
+                field: "encodedPayloadBytes",
+                reason: "must not exceed the ciphertext cap",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for EncodedPayloadBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(u32::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoundedList<T, const N: usize> {
