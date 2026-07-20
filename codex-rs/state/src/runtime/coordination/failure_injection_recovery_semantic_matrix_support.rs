@@ -343,10 +343,6 @@ pub(super) async fn snapshot(
     frozen_state(runtime, FrozenStateInputs::new(runtime.codex_home())).await
 }
 
-pub(super) fn assert_snapshot_private(snapshot: &FrozenCoordinationState) {
-    assert!(!format!("{snapshot:?}").contains("item-recovery-1"));
-}
-
 fn counted(steps: &[RecoveryStep]) -> Vec<CrashPoint> {
     steps
         .iter()

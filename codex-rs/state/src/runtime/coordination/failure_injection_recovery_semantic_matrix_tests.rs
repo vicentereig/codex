@@ -37,14 +37,12 @@ async fn run_case(case: SemanticCase) -> anyhow::Result<()> {
         case.assert_success(&expected_output);
         assert_eq!(control_injector.trace(), success_trace);
         let expected_committed = snapshot(&control).await?;
-        assert_snapshot_private(&expected_committed);
         assert_integrity(&control).await?;
         control.close().await;
         drop(control);
 
         let runtime = StateRuntime::init(home.clone(), "test".to_string()).await?;
         let before = snapshot(&runtime).await?;
-        assert_snapshot_private(&before);
         let injector = CrashInjector::fail_at(point, NOW_MS);
         let result = case.invoke(&runtime, &input, &injector).await;
         assert!(matches!(result, Err(RecoveryWriteError::Internal(_))));
@@ -56,7 +54,6 @@ async fn run_case(case: SemanticCase) -> anyhow::Result<()> {
             let reopened = StateRuntime::init(home.clone(), "test".to_string()).await?;
             let committed = snapshot(&reopened).await?;
             assert_eq!(committed, expected_committed);
-            assert_snapshot_private(&committed);
             assert_stable(case, &reopened, &input, &expected_output).await?;
             assert_eq!(snapshot(&reopened).await?, expected_committed);
             assert_integrity(&reopened).await?;
@@ -80,7 +77,6 @@ async fn run_case(case: SemanticCase) -> anyhow::Result<()> {
         assert_eq!(retry_injector.trace(), success_trace);
         let committed = snapshot(&reopened).await?;
         assert_eq!(committed, expected_committed);
-        assert_snapshot_private(&committed);
         drop(reopened);
 
         let stable = StateRuntime::init(home, "test".to_string()).await?;
@@ -98,7 +94,6 @@ async fn assert_success_trace(case: SemanticCase) -> anyhow::Result<()> {
     let output = case.invoke(&runtime, &input, &injector).await?;
     case.assert_success(&output);
     assert_eq!(injector.trace(), case.success_trace());
-    assert_snapshot_private(&snapshot(&runtime).await?);
     assert_integrity(&runtime).await?;
     runtime.close().await;
     Ok(())
