@@ -93,6 +93,9 @@ mod command_payload_tests;
 #[path = "commands_tests.rs"]
 mod commands_tests;
 #[cfg(test)]
+#[path = "coordination_privacy_gate_tests.rs"]
+mod coordination_privacy_gate_tests;
+#[cfg(test)]
 #[path = "failure_injection_aggregate_matrix_support.rs"]
 mod failure_injection_aggregate_matrix_support;
 #[cfg(test)]
@@ -119,6 +122,12 @@ mod failure_injection_integrity;
 #[cfg(test)]
 #[path = "failure_injection_integrity_tests.rs"]
 mod failure_injection_integrity_tests;
+#[cfg(test)]
+#[path = "failure_injection_recovery_batch_matrix_tests.rs"]
+mod failure_injection_recovery_batch_matrix_tests;
+#[cfg(test)]
+#[path = "failure_injection_recovery_matrix_support.rs"]
+mod failure_injection_recovery_matrix_support;
 #[cfg(test)]
 #[path = "failure_injection_recovery_outbox_matrix_support.rs"]
 mod failure_injection_recovery_outbox_matrix_support;
