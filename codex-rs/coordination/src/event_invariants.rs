@@ -303,7 +303,7 @@ fn validate_kind(
                     "native detach requires a previous owner and clears responsibility",
                 ));
             }
-            1
+            0
         }
         CoordinationEventKind::DependencyDeclared {
             dependent,
@@ -313,7 +313,7 @@ fn validate_kind(
             known_target(dependent)?;
             known_target(prerequisite)?;
             known_owner()?;
-            1
+            0
         }
         CoordinationEventKind::OwnershipChanged {
             target,
@@ -335,7 +335,7 @@ fn validate_kind(
                     "native ownership change requires exact known owners",
                 ));
             }
-            1
+            0
         }
         CoordinationEventKind::TerminalResultObserved { summary, .. } => {
             require_encrypted(native, summary)?;

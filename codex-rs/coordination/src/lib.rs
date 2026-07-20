@@ -5,6 +5,7 @@
 mod checked;
 mod compatibility;
 mod event;
+mod event_causality;
 mod event_invariants;
 mod evidence;
 
@@ -29,3 +30,7 @@ mod evidence_tests;
 #[cfg(test)]
 #[path = "event_fixture_tests.rs"]
 mod event_fixture_tests;
+
+#[cfg(test)]
+#[path = "event_causality_tests.rs"]
+mod event_causality_tests;

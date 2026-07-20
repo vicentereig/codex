@@ -209,6 +209,14 @@ pub struct IdempotencyRecord {
 }
 
 impl IdempotencyRecord {
+    pub fn from_event(key: IdempotencyKey, event: &crate::CoordinationEvent) -> Self {
+        Self {
+            key,
+            content_fingerprint: event.fingerprint(),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_serializable<T: Serialize>(
         key: IdempotencyKey,
         content: &T,
