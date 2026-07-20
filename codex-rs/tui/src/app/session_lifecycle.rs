@@ -133,11 +133,6 @@ impl App {
                     .await;
             }
         }
-        let runtime_snapshot = self.agent_runtime.snapshot();
-        self.chat_widget.add_to_history(
-            crate::agent_runtime::AgentSnapshotHistoryCell::new_optional(runtime_snapshot),
-        );
-
         let mut thread_ids = self.agent_navigation.tracked_thread_ids();
         for thread_id in self.thread_event_channels.keys().copied() {
             if !thread_ids.contains(&thread_id) {
@@ -164,12 +159,6 @@ impl App {
             .has_non_primary_thread(self.primary_thread_id);
         if !self.config.features.enabled(Feature::Collab) && !has_non_primary_agent_thread {
             self.chat_widget.open_multi_agent_enable_prompt();
-            return;
-        }
-
-        if self.agent_navigation.is_empty() {
-            self.chat_widget
-                .add_info_message("No agents available yet.".to_string(), /*hint*/ None);
             return;
         }
 
@@ -264,14 +253,22 @@ impl App {
         agent_role: Option<String>,
         is_closed: bool,
     ) {
-        self.chat_widget.set_collab_agent_metadata(
-            thread_id,
-            agent_nickname.clone(),
-            agent_role.clone(),
-        );
         self.agent_navigation
             .upsert(thread_id, agent_nickname, agent_role, is_closed);
+        self.sync_collab_agent_identity(thread_id);
         self.sync_active_agent_label();
+    }
+
+    pub(super) fn sync_collab_agent_identity(&mut self, thread_id: ThreadId) {
+        let Some(entry) = self.agent_navigation.get(&thread_id) else {
+            return;
+        };
+        self.chat_widget.set_collab_agent_metadata(
+            thread_id,
+            entry.agent_nickname.clone(),
+            entry.agent_role.clone(),
+            entry.agent_path.clone(),
+        );
     }
 
     /// Persists the app-server's authoritative ownership flag and updates the active composer.
@@ -329,6 +326,7 @@ impl App {
                     self.agent_navigation.mark_parent_owned(thread_id);
                 }
                 self.agent_navigation.set_agent_path(thread_id, agent_path);
+                self.sync_collab_agent_identity(thread_id);
                 if is_running {
                     self.agent_navigation.mark_running(thread_id);
                 } else {
@@ -416,8 +414,9 @@ impl App {
                 if turns.is_empty() {
                     // A `thread/read` fallback without turns would create a blank local replay
                     // channel with no live listener attached, which blocks later real re-attach.
+                    let label = self.thread_label(thread_id);
                     return Err(color_eyre::eyre::eyre!(
-                        "Agent thread {thread_id} is not yet available for replay or live attach."
+                        "{label} is not yet available for replay or live attach."
                     ));
                 }
                 let mut session = self.session_state_for_thread_read(thread_id, &thread).await;
@@ -457,6 +456,7 @@ impl App {
                 thread_id,
                 entry.agent_nickname.clone(),
                 entry.agent_role.clone(),
+                entry.agent_path.clone(),
             );
         }
         self.chat_widget = chat_widget;
@@ -481,8 +481,9 @@ impl App {
                 .refresh_agent_picker_thread_liveness(app_server, thread_id)
                 .await)
         {
+            let label = self.thread_label(thread_id);
             self.chat_widget
-                .add_error_message(format!("Agent thread {thread_id} is no longer available."));
+                .add_error_message(format!("{label} is no longer available."));
             return Ok(());
         }
         let mut is_replay_only = self
@@ -502,15 +503,16 @@ impl App {
                     }
                 }
                 Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to attach to agent thread {thread_id}: {err}"
-                    ));
+                    let label = self.thread_label(thread_id);
+                    self.chat_widget
+                        .add_error_message(format!("Failed to attach to {label}: {err}"));
                     return Ok(());
                 }
             }
         } else if !self.thread_event_channels.contains_key(&thread_id) && is_replay_only {
+            let label = self.thread_label(thread_id);
             self.chat_widget
-                .add_error_message(format!("Agent thread {thread_id} is no longer available."));
+                .add_error_message(format!("{label} is no longer available."));
             return Ok(());
         }
         let previous_thread_id = self.active_thread_id;
@@ -518,8 +520,9 @@ impl App {
         self.active_thread_id = None;
         let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
         else {
+            let label = self.thread_label(thread_id);
             self.chat_widget
-                .add_error_message(format!("Agent thread {thread_id} is already active."));
+                .add_error_message(format!("{label} is already active."));
             if let Some(previous_thread_id) = previous_thread_id {
                 self.activate_thread_channel(previous_thread_id).await;
             }
@@ -551,12 +554,11 @@ impl App {
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
         if is_replay_only {
+            let label = self.thread_label(thread_id);
             let message = if attached_replay_only {
-                format!(
-                    "Agent thread {thread_id} could not be resumed live. Replaying saved transcript."
-                )
+                format!("{label} could not be resumed live. Replaying saved transcript.")
             } else {
-                format!("Agent thread {thread_id} is closed. Replaying saved transcript.")
+                format!("{label} is closed. Replaying saved transcript.")
             };
             self.chat_widget.add_info_message(message, /*hint*/ None);
         }
@@ -857,6 +859,7 @@ impl App {
             );
             self.agent_navigation
                 .set_agent_path(thread.thread_id, agent_path);
+            self.sync_collab_agent_identity(thread.thread_id);
             // A live channel can have an empty store after a successful spawn. Only apply server
             // status for channels that would otherwise need another liveness read.
             if !has_live_channel {

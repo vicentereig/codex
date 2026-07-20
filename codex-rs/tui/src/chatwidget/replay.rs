@@ -12,6 +12,12 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     pub(crate) fn replay_thread_turns(&mut self, turns: Vec<Turn>, replay_kind: ReplayKind) {
+        // Path identity can be recorded after an earlier collaboration item in persisted history.
+        // Index the bounded replay batch before rendering so those earlier rows do not fall back to
+        // UUIDs merely because the path-bearing activity item appears later in the transcript.
+        for item in turns.iter().flat_map(|turn| &turn.items) {
+            self.cache_sub_agent_identity_from_item(item);
+        }
         let hidden_nested_review_turns = std::iter::once(/*value*/ false)
             .chain(turns.windows(/*size*/ 2).map(|turns| {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])
@@ -86,6 +92,21 @@ impl ChatWidget {
                     Some(replay_kind),
                 );
             }
+        }
+    }
+
+    pub(crate) fn cache_sub_agent_identity_from_item(&mut self, item: &ThreadItem) {
+        if let ThreadItem::SubAgentActivity {
+            agent_thread_id,
+            agent_path,
+            ..
+        } = item
+            && let Ok(thread_id) = ThreadId::from_string(agent_thread_id)
+        {
+            self.collab_agent_metadata
+                .entry(thread_id)
+                .or_default()
+                .agent_path = Some(agent_path.clone());
         }
     }
 

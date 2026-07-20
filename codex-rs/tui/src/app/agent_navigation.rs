@@ -21,7 +21,6 @@
 
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
-use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
 use codex_protocol::ThreadId;
@@ -83,6 +82,7 @@ impl AgentNavigationState {
     ///
     /// This is the cheapest way for `App` to decide whether opening the picker should show "No
     /// agents available yet." rather than constructing picker rows from an empty state.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.threads.is_empty()
     }
@@ -102,16 +102,28 @@ impl AgentNavigationState {
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
-        let (previous_agent_path, previous_is_running) = self
+        let (
+            previous_agent_nickname,
+            previous_agent_role,
+            previous_agent_path,
+            previous_is_running,
+        ) = self
             .threads
             .get(&thread_id)
-            .map(|entry| (entry.agent_path.clone(), entry.is_running))
-            .unwrap_or((None, false));
+            .map(|entry| {
+                (
+                    entry.agent_nickname.clone(),
+                    entry.agent_role.clone(),
+                    entry.agent_path.clone(),
+                    entry.is_running,
+                )
+            })
+            .unwrap_or((None, None, None, false));
         self.threads.insert(
             thread_id,
             AgentPickerThreadEntry {
-                agent_nickname,
-                agent_role,
+                agent_nickname: agent_nickname.or(previous_agent_nickname),
+                agent_role: agent_role.or(previous_agent_role),
                 agent_path: previous_agent_path,
                 is_running: previous_is_running && !is_closed,
                 is_closed,
@@ -318,33 +330,27 @@ impl AgentNavigationState {
             self.threads
                 .get(&thread_id)
                 .map(|entry| {
-                    if !is_primary
-                        && let Some(agent_path) = entry
-                            .agent_path
-                            .as_deref()
-                            .filter(|agent_path| !agent_path.trim().is_empty())
-                    {
-                        return format!("`{agent_path}` · Esc to main");
-                    }
-                    let label = format_agent_picker_item_name(
-                        entry.agent_nickname.as_deref(),
-                        entry.agent_role.as_deref(),
-                        is_primary,
-                    );
                     if is_primary {
-                        label
+                        "Main [default]".to_string()
                     } else {
-                        format!("{label} · Esc to main")
+                        format!(
+                            "{} · Esc to Main",
+                            entry.display_identity(thread_id).contextual_label()
+                        )
                     }
                 })
                 .unwrap_or_else(|| {
-                    let label = format_agent_picker_item_name(
-                        /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
-                    );
                     if is_primary {
-                        label
+                        "Main [default]".to_string()
                     } else {
-                        format!("{label} · Esc to main")
+                        format!(
+                            "{} · Esc to Main",
+                            crate::agent_runtime::AgentDisplayIdentity::new(
+                                thread_id, /*agent_path*/ None, /*nickname*/ None,
+                                /*role*/ None,
+                            )
+                            .contextual_label()
+                        )
                     }
                 }),
         )
@@ -358,7 +364,7 @@ impl AgentNavigationState {
         let previous: Span<'static> = previous_agent_shortcut().into();
         let next: Span<'static> = next_agent_shortcut().into();
         format!(
-            "Select an agent to watch. {} previous, {} next.",
+            "Select an agent to inspect. {} previous, {} next.",
             previous.content, next.content
         )
     }
@@ -430,6 +436,30 @@ mod tests {
     }
 
     #[test]
+    fn upsert_preserves_metadata_when_partial_update_is_missing() {
+        let (mut state, _main_thread_id, first_agent_id, _second_agent_id) = populated_state();
+        state.set_agent_path(first_agent_id, Some("/root/research".to_string()));
+
+        state.upsert(
+            first_agent_id,
+            /*agent_nickname*/ None,
+            /*agent_role*/ None,
+            /*is_closed*/ false,
+        );
+
+        assert_eq!(
+            state.get(&first_agent_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("Robie".to_string()),
+                agent_role: Some("explorer".to_string()),
+                agent_path: Some("/root/research".to_string()),
+                is_running: false,
+                is_closed: false,
+            })
+        );
+    }
+
+    #[test]
     fn parent_owned_state_is_removed_with_thread_metadata() {
         let (mut state, _main_thread_id, first_agent_id, second_agent_id) = populated_state();
 
@@ -477,11 +507,60 @@ mod tests {
 
         assert_eq!(
             state.active_agent_label(Some(first_agent_id), Some(main_thread_id)),
-            Some("Robie [explorer] · Esc to main".to_string())
+            Some("Robie [explorer] · Esc to Main".to_string())
         );
         assert_eq!(
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
             Some("Main [default]".to_string())
         );
+    }
+
+    #[test]
+    fn active_agent_label_prefers_path_and_disambiguates_duplicate_nicknames() {
+        let mut state = AgentNavigationState::default();
+        let main_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000101").expect("valid thread");
+        let research_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000102").expect("valid thread");
+        let review_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000103").expect("valid thread");
+        let role_only_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000104").expect("valid thread");
+
+        state.upsert(main_thread_id, None, None, /*is_closed*/ false);
+        state.upsert(
+            research_thread_id,
+            Some("Scout".to_string()),
+            Some("reviewer".to_string()),
+            /*is_closed*/ false,
+        );
+        state.upsert(
+            review_thread_id,
+            Some("Scout".to_string()),
+            Some("reviewer".to_string()),
+            /*is_closed*/ false,
+        );
+        state.upsert(
+            role_only_thread_id,
+            None,
+            Some("worker".to_string()),
+            /*is_closed*/ false,
+        );
+        state.set_agent_path(research_thread_id, Some("/root/research".to_string()));
+        state.set_agent_path(review_thread_id, Some("/root/review".to_string()));
+
+        assert_eq!(
+            state.active_agent_label(Some(research_thread_id), Some(main_thread_id)),
+            Some("Scout [reviewer] · /root/research · Esc to Main".to_string())
+        );
+        assert_eq!(
+            state.active_agent_label(Some(review_thread_id), Some(main_thread_id)),
+            Some("Scout [reviewer] · /root/review · Esc to Main".to_string())
+        );
+        let role_only_label = state
+            .active_agent_label(Some(role_only_thread_id), Some(main_thread_id))
+            .expect("role-only identity should have a contextual label");
+        assert_eq!(role_only_label, "[worker] · Agent (00000104) · Esc to Main");
+        assert!(!role_only_label.contains(&role_only_thread_id.to_string()));
     }
 }

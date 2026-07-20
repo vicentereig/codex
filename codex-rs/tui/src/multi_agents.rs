@@ -4,6 +4,7 @@
 //! entries, and the fast-switch keyboard shortcuts. Higher-level coordination, such as deciding
 //! which thread becomes active or when a thread closes, stays in [`crate::app::App`].
 
+use crate::agent_runtime::AgentDisplayIdentity;
 use crate::agent_runtime::AgentLifecycle;
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
@@ -14,6 +15,7 @@ use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crossterm::event::KeyCode;
@@ -45,6 +47,19 @@ pub(crate) struct AgentPickerThreadEntry {
     pub(crate) is_closed: bool,
 }
 
+impl AgentPickerThreadEntry {
+    pub(crate) fn display_identity(&self, thread_id: ThreadId) -> AgentDisplayIdentity {
+        AgentDisplayIdentity::new(
+            thread_id,
+            self.agent_path
+                .as_deref()
+                .and_then(|path| AgentPath::try_from(path).ok()),
+            self.agent_nickname.clone(),
+            self.agent_role.clone(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubAgentActivityDisplay {
     pub(crate) thread_id: ThreadId,
@@ -58,13 +73,8 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_nickname: Option<String>,
     /// Agent type shown in brackets when present, for example `worker`.
     pub(crate) agent_role: Option<String>,
-}
-
-#[derive(Clone, Copy)]
-struct AgentLabel<'a> {
-    thread_id: Option<ThreadId>,
-    nickname: Option<&'a str>,
-    role: Option<&'a str>,
+    /// Canonical agent path used as the stable display identity when known.
+    pub(crate) agent_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,27 +112,6 @@ pub(crate) fn agent_picker_status_spans(
         Some(AgentLifecycle::Closed) => ("closed", ratatui::style::Style::new().dim()),
     };
     vec!["[".dim(), Span::styled(label, style), "] ".dim()]
-}
-
-pub(crate) fn format_agent_picker_item_name(
-    agent_nickname: Option<&str>,
-    agent_role: Option<&str>,
-    is_primary: bool,
-) -> String {
-    if is_primary {
-        return "Main [default]".to_string();
-    }
-
-    let agent_nickname = agent_nickname
-        .map(str::trim)
-        .filter(|nickname| !nickname.is_empty());
-    let agent_role = agent_role.map(str::trim).filter(|role| !role.is_empty());
-    match (agent_nickname, agent_role) {
-        (Some(agent_nickname), Some(agent_role)) => format!("{agent_nickname} [{agent_role}]"),
-        (Some(agent_nickname), None) => agent_nickname.to_string(),
-        (None, Some(agent_role)) => format!("[{agent_role}]"),
-        (None, None) => "Agent".to_string(),
-    }
 }
 
 pub(crate) fn previous_agent_shortcut() -> crate::key_hint::KeyBinding {
@@ -495,7 +484,7 @@ fn title_text(title: impl Into<String>) -> Line<'static> {
 
 fn title_with_agent(
     prefix: &str,
-    agent: AgentLabel<'_>,
+    agent: AgentDisplayIdentity,
     spawn_request: Option<&SpawnRequestSummary>,
 ) -> Line<'static> {
     let mut spans = vec![Span::from(format!("{prefix} ")).bold()];
@@ -515,40 +504,24 @@ fn parse_thread_id(thread_id: &str) -> Option<ThreadId> {
     ThreadId::from_string(thread_id).ok()
 }
 
-fn agent_label(thread_id: ThreadId, metadata: &AgentMetadata) -> AgentLabel<'_> {
-    AgentLabel {
-        thread_id: Some(thread_id),
-        nickname: metadata.agent_nickname.as_deref(),
-        role: metadata.agent_role.as_deref(),
-    }
+fn agent_label(thread_id: ThreadId, metadata: &AgentMetadata) -> AgentDisplayIdentity {
+    AgentDisplayIdentity::new(
+        thread_id,
+        metadata
+            .agent_path
+            .as_deref()
+            .and_then(|path| AgentPath::try_from(path).ok()),
+        metadata.agent_nickname.clone(),
+        metadata.agent_role.clone(),
+    )
 }
 
-fn agent_label_line(agent: AgentLabel<'_>) -> Line<'static> {
+fn agent_label_line(agent: AgentDisplayIdentity) -> Line<'static> {
     agent_label_spans(agent).into()
 }
 
-fn agent_label_spans(agent: AgentLabel<'_>) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let nickname = agent
-        .nickname
-        .map(str::trim)
-        .filter(|nickname| !nickname.is_empty());
-    let role = agent.role.map(str::trim).filter(|role| !role.is_empty());
-
-    if let Some(nickname) = nickname {
-        spans.push(Span::from(nickname.to_string()).cyan().bold());
-    } else if let Some(thread_id) = agent.thread_id {
-        spans.push(Span::from(thread_id.to_string()).cyan());
-    } else {
-        spans.push(Span::from("agent").cyan());
-    }
-
-    if let Some(role) = role {
-        spans.push(Span::from(" ").dim());
-        spans.push(Span::from(format!("[{role}]")));
-    }
-
-    spans
+fn agent_label_spans(agent: AgentDisplayIdentity) -> Vec<Span<'static>> {
+    vec![Span::from(agent.contextual_label()).cyan().bold()]
 }
 
 fn spawn_request_spans(spawn_request: Option<&SpawnRequestSummary>) -> Vec<Span<'static>> {
@@ -940,14 +913,14 @@ mod tests {
 
         let lines = cell.display_lines(/*width*/ 200);
         let title = &lines[0];
-        assert_eq!(title.spans[2].content.as_ref(), "Robie");
+        assert_eq!(
+            title.spans[2].content.as_ref(),
+            "Robie [explorer] · /root/robie"
+        );
         assert_eq!(title.spans[2].style.fg, Some(Color::Cyan));
         assert!(title.spans[2].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(title.spans[4].content.as_ref(), "[explorer]");
-        assert_eq!(title.spans[4].style.fg, None);
-        assert!(!title.spans[4].style.add_modifier.contains(Modifier::DIM));
-        assert_eq!(title.spans[6].content.as_ref(), "(gpt-5 high)");
-        assert_eq!(title.spans[6].style.fg, Some(Color::Magenta));
+        assert_eq!(title.spans[4].content.as_ref(), "(gpt-5 high)");
+        assert_eq!(title.spans[4].style.fg, Some(Color::Magenta));
     }
 
     #[test]
@@ -992,11 +965,13 @@ mod tests {
             AgentMetadata {
                 agent_nickname: Some("Robie".to_string()),
                 agent_role: Some("explorer".to_string()),
+                agent_path: Some("/root/robie".to_string()),
             }
         } else if thread_id == bob_id {
             AgentMetadata {
                 agent_nickname: Some("Bob".to_string()),
                 agent_role: Some("worker".to_string()),
+                agent_path: Some("/root/bob".to_string()),
             }
         } else {
             AgentMetadata::default()

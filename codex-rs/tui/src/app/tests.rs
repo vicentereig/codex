@@ -33,7 +33,6 @@ use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
-use crate::multi_agents::format_agent_picker_item_name;
 use assert_matches::assert_matches;
 
 use crate::app_command::AppCommand as Op;
@@ -1422,7 +1421,7 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
 
 #[tokio::test]
 async fn open_agent_picker_preserves_running_hints_until_observed_completion() -> Result<()> {
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
     ))
@@ -1448,23 +1447,6 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
         is_closed: false,
     };
     assert_eq!(app.agent_navigation.get(&thread_id), Some(&expected_entry));
-    let status = loop {
-        let event = app_event_rx
-            .try_recv()
-            .expect("agent snapshot history cell");
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-            if rendered.contains("Agent snapshot") {
-                break rendered;
-            }
-        }
-    };
-    assert_snapshot!(status, @r###"
-    • Agent snapshot · last observed event #0
-      Point-in-time reported state · exact-turn checklists are agent-reported, not
-      verified
-      └─ no agents observed in this session
-    "###);
 
     app.enqueue_thread_notification(
         thread_id,
@@ -1505,6 +1487,99 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
 
     expected_entry.is_running = true;
     assert_eq!(app.agent_navigation.get(&thread_id), Some(&expected_entry));
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_agent_picker_does_not_add_agent_snapshot_history() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await
+    .expect("embedded app server");
+    let thread_id = ThreadId::new();
+    app.thread_event_channels
+        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    app.agent_navigation
+        .record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id,
+            agent_path: "/root/worker".to_string(),
+            is_running_hint: true,
+        });
+
+    Box::pin(app.open_agent_picker(&mut app_server)).await;
+
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut inserted_history = Vec::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            inserted_history.push(lines_to_single_string(&cell.display_lines(/*width*/ 80)));
+            app.insert_history_cell(&mut tui, cell);
+        }
+    }
+
+    assert!(
+        inserted_history.is_empty(),
+        "opening /agent must not insert history cells: {inserted_history:?}"
+    );
+    assert!(app.transcript_cells.is_empty());
+    assert_eq!(
+        app.agent_navigation.get(&thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: None,
+            agent_role: None,
+            agent_path: Some("/root/worker".to_string()),
+            is_running: true,
+            is_closed: false,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_agent_workspace_preserves_existing_transcript_on_open_and_close() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let _ = app.config.features.enable(Feature::Collab);
+    app.transcript_cells
+        .push(Arc::new(PlainHistoryCell::new(vec![Line::from(
+            "existing transcript",
+        )])));
+    let transcript = |app: &App| {
+        app.transcript_cells
+            .iter()
+            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+    };
+    let before = transcript(&app);
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await
+    .expect("embedded app server");
+
+    Box::pin(app.open_agent_picker(&mut app_server)).await;
+
+    assert!(app.chat_widget.has_active_view());
+    assert_eq!(transcript(&app), before);
+    assert!(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .all(|event| !matches!(event, AppEvent::InsertHistoryCell(_)))
+    );
+
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+
+    assert!(!app.chat_widget.has_active_view());
+    assert_eq!(transcript(&app), before);
+    assert!(
+        std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .all(|event| !matches!(event, AppEvent::InsertHistoryCell(_)))
+    );
     Ok(())
 }
 
@@ -1929,7 +2004,7 @@ fn attach_live_thread_for_selection_rejects_empty_non_ephemeral_fallback_threads
 
         assert_eq!(
             err.to_string(),
-            format!("Agent thread {thread_id} is not yet available for replay or live attach.")
+            "Scout [worker] is not yet available for replay or live attach."
         );
         assert!(!app.thread_event_channels.contains_key(&thread_id));
         Ok(())
@@ -1969,7 +2044,7 @@ fn attach_live_thread_for_selection_rejects_unmaterialized_fallback_threads() ->
 
         assert_eq!(
             err.to_string(),
-            format!("Agent thread {thread_id} is not yet available for replay or live attach.")
+            "Scout [worker] is not yet available for replay or live attach."
         );
         assert!(!app.thread_event_channels.contains_key(&thread_id));
         Ok(())
@@ -2136,7 +2211,7 @@ async fn open_agent_picker_prompts_to_enable_multi_agent_when_disabled() -> Resu
     let _ = app.config.features.disable(Feature::Collab);
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
-    assert_matches!(app_event_rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    assert!(app_event_rx.try_recv().is_err());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2708,7 +2783,7 @@ async fn open_agent_picker_allows_existing_agent_threads_when_feature_is_disable
         .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
-    assert_matches!(app_event_rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    assert!(app_event_rx.try_recv().is_err());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -2750,7 +2825,6 @@ async fn refresh_pending_thread_approvals_only_lists_inactive_threads() {
         Some("explorer".to_string()),
         /*is_closed*/ false,
     );
-
     app.refresh_pending_thread_approvals().await;
     assert_eq!(
         app.chat_widget.pending_thread_approvals(),
@@ -2793,6 +2867,9 @@ async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
         Some("explorer".to_string()),
         /*is_closed*/ false,
     );
+    app.agent_navigation.mark_parent_owned(agent_thread_id);
+    app.agent_navigation
+        .set_agent_path(agent_thread_id, Some("/root/robie".to_string()));
 
     app.enqueue_thread_request(
         agent_thread_id,
@@ -2808,8 +2885,10 @@ async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
     assert_eq!(app.chat_widget.has_active_view(), true);
     assert_eq!(
         app.chat_widget.pending_thread_approvals(),
-        &["Robie [explorer]".to_string()]
+        &["Robie [explorer] · /root/robie".to_string()]
     );
+    assert_eq!(app.active_thread_id, Some(main_thread_id));
+    assert!(app.agent_navigation.is_parent_owned(agent_thread_id));
 
     Ok(())
 }
@@ -3612,59 +3691,6 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         "thread/read does not return fresh server permissions; the fallback profile must use the \
          active widget permissions rather than reusing the cached primary session profile"
     );
-}
-
-#[test]
-fn agent_picker_item_name_snapshot() {
-    let thread_id =
-        ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id");
-    let snapshot = [
-        format!(
-            "{} | {}",
-            format_agent_picker_item_name(
-                Some("Robie"),
-                Some("explorer"),
-                /*is_primary*/ true
-            ),
-            thread_id
-        ),
-        format!(
-            "{} | {}",
-            format_agent_picker_item_name(
-                Some("Robie"),
-                Some("explorer"),
-                /*is_primary*/ false
-            ),
-            thread_id
-        ),
-        format!(
-            "{} | {}",
-            format_agent_picker_item_name(
-                Some("Robie"),
-                /*agent_role*/ None,
-                /*is_primary*/ false
-            ),
-            thread_id
-        ),
-        format!(
-            "{} | {}",
-            format_agent_picker_item_name(
-                /*agent_nickname*/ None,
-                Some("explorer"),
-                /*is_primary*/ false
-            ),
-            thread_id
-        ),
-        format!(
-            "{} | {}",
-            format_agent_picker_item_name(
-                /*agent_nickname*/ None, /*agent_role*/ None, /*is_primary*/ false
-            ),
-            thread_id
-        ),
-    ]
-    .join("\n");
-    assert_app_snapshot!("agent_picker_item_name", snapshot);
 }
 
 #[tokio::test]
@@ -6573,6 +6599,72 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
 }
 
 #[tokio::test]
+async fn replay_thread_snapshot_uses_later_activity_path_for_earlier_collab_row() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    let receiver_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b958ce5dc1cc").expect("valid thread");
+
+    app.replay_thread_snapshot(
+        ThreadEventSnapshot {
+            session: Some(test_thread_session(
+                thread_id,
+                test_path_buf("/tmp/project"),
+            )),
+            turns: Vec::new(),
+            events: vec![
+                ThreadBufferedEvent::Notification(ServerNotification::ItemStarted(
+                    codex_app_server_protocol::ItemStartedNotification {
+                        thread_id: thread_id.to_string(),
+                        turn_id: "turn-1".to_string(),
+                        started_at_ms: 0,
+                        item: ThreadItem::CollabAgentToolCall {
+                            id: "wait-1".to_string(),
+                            tool: codex_app_server_protocol::CollabAgentTool::Wait,
+                            status:
+                                codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
+                            sender_thread_id: thread_id.to_string(),
+                            receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            prompt: None,
+                            model: None,
+                            reasoning_effort: None,
+                            agents_states: HashMap::new(),
+                        },
+                    },
+                )),
+                ThreadBufferedEvent::Notification(ServerNotification::ItemStarted(
+                    codex_app_server_protocol::ItemStartedNotification {
+                        thread_id: thread_id.to_string(),
+                        turn_id: "turn-1".to_string(),
+                        started_at_ms: 1,
+                        item: ThreadItem::SubAgentActivity {
+                            id: "activity-1".to_string(),
+                            kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                            agent_thread_id: receiver_thread_id.to_string(),
+                            agent_path: "/root/worker".to_string(),
+                        },
+                    },
+                )),
+            ],
+            input_state: None,
+        },
+        /*resume_restored_queue*/ false,
+    );
+
+    let history = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("/root/worker"));
+    assert!(!history.contains(&receiver_thread_id.to_string()));
+}
+
+#[tokio::test]
 async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let receiver_thread_id =
@@ -6652,6 +6744,59 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
         saw_named_wait,
         "expected replayed wait item to keep agent name"
     );
+}
+
+#[tokio::test]
+async fn partial_picker_update_preserves_collaboration_history_identity() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let receiver_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b958ce5dc1cc").expect("valid thread");
+    app.upsert_agent_picker_thread(
+        receiver_thread_id,
+        Some("Robie".to_string()),
+        Some("explorer".to_string()),
+        /*is_closed*/ false,
+    );
+    app.agent_navigation
+        .set_agent_path(receiver_thread_id, Some("/root/robie".to_string()));
+    app.sync_collab_agent_identity(receiver_thread_id);
+
+    app.upsert_agent_picker_thread(
+        receiver_thread_id,
+        /*agent_nickname*/ None,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.chat_widget.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: ThreadItem::CollabAgentToolCall {
+                id: "wait-1".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::Wait,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
+                sender_thread_id: ThreadId::new().to_string(),
+                receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let history = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("Robie [explorer] · /root/robie"));
 }
 
 #[tokio::test]

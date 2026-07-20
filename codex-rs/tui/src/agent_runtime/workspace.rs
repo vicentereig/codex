@@ -1,5 +1,6 @@
 //! Point-in-time master/detail rendering for the agent picker.
 
+use super::AgentDisplayIdentity;
 use super::model::AgentLifecycle;
 use super::model::AgentPlanSnapshot;
 use super::model::AgentRuntimeSnapshot;
@@ -15,6 +16,7 @@ use crate::text_formatting::truncate_text;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use codex_app_server_protocol::TurnPlanStepStatus;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -41,7 +43,7 @@ const MAX_DETAIL_LINES: usize = 24;
 #[derive(Debug, Clone)]
 struct WorkspaceAgent {
     thread_id: ThreadId,
-    label: String,
+    identity: AgentDisplayIdentity,
     entry: AgentPickerThreadEntry,
     summary: Option<AgentRuntimeSummary>,
     depth: usize,
@@ -92,16 +94,26 @@ impl AgentWorkspace {
                           entry: AgentPickerThreadEntry,
                           relationship: AgentHierarchyRelationship| {
             let summary = summaries.get(&thread_id).cloned();
-            let label = summary
+            let agent_path = summary
                 .as_ref()
                 .and_then(|summary| summary.agent_path.clone())
                 .or_else(|| entry.agent_path.clone())
-                .or_else(|| entry.agent_nickname.clone())
-                .or_else(|| entry.agent_role.clone())
-                .unwrap_or_else(|| format!("thread {thread_id}"));
+                .and_then(|path| AgentPath::try_from(path).ok());
+            let identity = AgentDisplayIdentity::new(
+                thread_id,
+                agent_path,
+                summary
+                    .as_ref()
+                    .and_then(|summary| summary.agent_nickname.clone())
+                    .or_else(|| entry.agent_nickname.clone()),
+                summary
+                    .as_ref()
+                    .and_then(|summary| summary.agent_role.clone())
+                    .or_else(|| entry.agent_role.clone()),
+            );
             WorkspaceAgent {
                 thread_id,
-                label,
+                identity,
                 entry,
                 depth: relationship.depth().unwrap_or_default(),
                 relationship,
@@ -171,18 +183,26 @@ impl AgentWorkspace {
                 logical_id: Some(agent.thread_id.to_string()),
                 name: match agent.relationship {
                     AgentHierarchyRelationship::Attached { .. } => {
-                        format!("{}{}", "  ".repeat(agent.depth), agent.label)
+                        format!(
+                            "{}{}",
+                            "  ".repeat(agent.depth),
+                            agent.identity.contextual_label()
+                        )
                     }
                     AgentHierarchyRelationship::Unattached(reason) => {
-                        format!("unattached · {} · {}", reason.label(), agent.label)
+                        format!(
+                            "unattached · {} · {}",
+                            reason.label(),
+                            agent.identity.contextual_label()
+                        )
                     }
                 },
-                description: Some(agent.thread_id.to_string()),
+                description: None,
                 name_prefix_spans: status_spans(agent),
                 is_current: current_thread_id == Some(agent.thread_id),
                 actions: vec![action(agent.thread_id)],
                 dismiss_on_select: true,
-                search_value: Some(format!("{} {}", agent.label, agent.thread_id)),
+                search_value: Some(agent.identity.search_text()),
                 ..Default::default()
             })
             .collect()
@@ -285,14 +305,8 @@ fn detail_lines(agent: Option<&WorkspaceAgent>, width: u16, compact: bool) -> Ve
     append_wrapped(
         &mut lines,
         detail_width,
-        &agent.label,
+        &agent.identity.contextual_label(),
         Style::default().bold(),
-    );
-    append_wrapped(
-        &mut lines,
-        detail_width,
-        &format!("thread {}", agent.thread_id),
-        Style::default().dim(),
     );
     let status = lifecycle(agent)
         .map(|status| {

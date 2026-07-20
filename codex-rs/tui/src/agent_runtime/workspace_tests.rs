@@ -100,18 +100,31 @@ fn workspace_wide_and_narrow_snapshots_bound_tombstone_detail() {
     let narrow = workspace.stacked_detail();
     insta::assert_snapshot!(render(&wide, 80, 12), @r###"
     /root/closed
-    thread 00000000-0000-0000-0000-000000000003
     lifecycle · closed
     point-in-time telemetry unavailable
     "###);
     insta::assert_snapshot!(render(&narrow, 32, 8), @r###"
     /root/closed
-    thread 00000000-0000-0000-0000-
-    000000000003
     lifecycle · closed
     point-in-time telemetry
     unavailable
     "###);
+}
+
+#[test]
+fn workspace_identity_snapshot_matrix_handles_wide_text_and_long_paths() {
+    let thread_id = id("00000000-0000-0000-0000-000000000019");
+    let mut agent_entry = entry(&format!("/root/{}", "long_segment_".repeat(12)), false);
+    agent_entry.agent_nickname = Some(format!("研究者{}", "界".repeat(24)));
+    agent_entry.agent_role = Some("reviewer".to_string());
+    let workspace = AgentWorkspace::new(vec![(thread_id, agent_entry)], None, 0);
+
+    for width in [40, 80, 120] {
+        insta::assert_snapshot!(
+            format!("agent_workspace_identity_{width}"),
+            render(&workspace.wide_detail(), width, 8)
+        );
+    }
 }
 
 #[test]
@@ -201,6 +214,7 @@ fn workspace_orders_children_after_parents_and_marks_unattached_agents() {
     let orphan_id = id("00000000-0000-0000-0000-000000000012");
     let cycle_one_id = id("00000000-0000-0000-0000-000000000013");
     let cycle_two_id = id("00000000-0000-0000-0000-000000000014");
+    let grandchild_id = id("00000000-0000-0000-0000-000000000015");
     let snapshot = AgentRuntimeSnapshot {
         revision: 3,
         last_observed_at_ms: Some(3),
@@ -211,8 +225,13 @@ fn workspace_orders_children_after_parents_and_marks_unattached_agents() {
                 AgentRuntimeParent::Authoritative(parent_id),
             ),
             runtime_summary(
+                grandchild_id,
+                "/root/grandchild",
+                AgentRuntimeParent::Authoritative(child_id),
+            ),
+            runtime_summary(
                 cycle_one_id,
-                "/root/cycle-one",
+                "/root/cycle_one",
                 AgentRuntimeParent::Authoritative(cycle_two_id),
             ),
             runtime_summary(
@@ -227,7 +246,7 @@ fn workspace_orders_children_after_parents_and_marks_unattached_agents() {
             ),
             runtime_summary(
                 cycle_two_id,
-                "/root/cycle-two",
+                "/root/cycle_two",
                 AgentRuntimeParent::Authoritative(cycle_one_id),
             ),
         ],
@@ -236,10 +255,11 @@ fn workspace_orders_children_after_parents_and_marks_unattached_agents() {
     let workspace = AgentWorkspace::new(
         vec![
             (child_id, entry("/root/child", false)),
-            (cycle_one_id, entry("/root/cycle-one", false)),
+            (grandchild_id, entry("/root/grandchild", false)),
+            (cycle_one_id, entry("/root/cycle_one", false)),
             (orphan_id, entry("/root/orphan", false)),
             (parent_id, entry("/root/parent", false)),
-            (cycle_two_id, entry("/root/cycle-two", false)),
+            (cycle_two_id, entry("/root/cycle_two", false)),
         ],
         Some(&snapshot),
         0,
@@ -252,9 +272,67 @@ fn workspace_orders_children_after_parents_and_marks_unattached_agents() {
 
     assert_eq!(names[0], "/root/parent");
     assert_eq!(names[1], "  /root/child");
-    assert_eq!(names[2], "unattached · parent cycle · /root/cycle-one");
-    assert_eq!(names[3], "unattached · parent unknown · /root/orphan");
-    assert_eq!(names[4], "unattached · parent cycle · /root/cycle-two");
+    assert_eq!(names[2], "    /root/grandchild");
+    assert_eq!(names[3], "unattached · parent cycle · /root/cycle_one");
+    assert_eq!(names[4], "unattached · parent unknown · /root/orphan");
+    assert_eq!(names[5], "unattached · parent cycle · /root/cycle_two");
+}
+
+#[test]
+fn workspace_items_keep_uuid_only_in_search_and_disambiguate_identity() {
+    let first = id("00000000-0000-0000-0000-000000000015");
+    let second = id("00000000-0000-0000-0000-000000000016");
+    let role_only = id("00000000-0000-0000-0000-000000000017");
+    let mut first_entry = entry("/root/research", false);
+    first_entry.agent_nickname = Some("Scout".to_string());
+    first_entry.agent_role = Some("reviewer".to_string());
+    let mut second_entry = entry("/root/review", false);
+    second_entry.agent_nickname = Some("Scout".to_string());
+    second_entry.agent_role = None;
+    let role_only_entry = crate::multi_agents::AgentPickerThreadEntry {
+        agent_nickname: None,
+        agent_role: Some("worker".to_string()),
+        agent_path: None,
+        is_running: true,
+        is_closed: false,
+    };
+    let workspace = AgentWorkspace::new(
+        vec![
+            (first, first_entry),
+            (second, second_entry),
+            (role_only, role_only_entry),
+        ],
+        None,
+        0,
+    );
+    let items = workspace.items(None, |_| Box::new(|_| {}));
+
+    assert_eq!(items[0].name, "Scout [reviewer] · /root/research");
+    assert_eq!(items[1].name, "Scout · /root/review");
+    assert_eq!(items[2].name, "[worker] · Agent (00000017)");
+    for (item, thread_id) in items.iter().zip([first, second, role_only]) {
+        assert_eq!(item.description, None);
+        assert!(!item.name.contains(&thread_id.to_string()));
+        assert!(
+            item.search_value
+                .as_deref()
+                .is_some_and(|value| value.contains(&thread_id.to_string()))
+        );
+    }
+}
+
+#[test]
+fn workspace_detail_wraps_contextual_identity_without_uuid() {
+    let thread_id = id("00000000-0000-0000-0000-000000000018");
+    let mut agent_entry = entry("/root/a_very_long_research_path", false);
+    agent_entry.agent_nickname = Some("Scout".to_string());
+    agent_entry.agent_role = Some("reviewer".to_string());
+    let workspace = AgentWorkspace::new(vec![(thread_id, agent_entry)], None, 0);
+    let rendered = render(&workspace.wide_detail(), 24, 8);
+
+    assert!(rendered.contains("Scout [reviewer]"));
+    assert!(rendered.contains("a_very"));
+    assert!(!rendered.contains(&thread_id.to_string()));
 }
 
 fn render(renderable: &dyn Renderable, width: u16, height: u16) -> String {

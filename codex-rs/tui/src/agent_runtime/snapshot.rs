@@ -1,33 +1,57 @@
 //! Immutable, point-in-time agent transcript snapshots.
 
+#[cfg(test)]
 use super::cost_projection::CostCoverage;
+#[cfg(test)]
 use super::model::AgentFreshness;
+#[cfg(test)]
 use super::model::AgentLifecycle;
+#[cfg(test)]
 use super::model::AgentPlanSnapshot;
 use super::model::AgentRuntimeParent;
+#[cfg(test)]
 use super::model::AgentRuntimeSnapshot;
 use super::model::AgentRuntimeSummary;
+#[cfg(test)]
 use crate::history_cell::HistoryCell;
+#[cfg(test)]
 use crate::history_cell::ReportedChecklistStatus;
+#[cfg(test)]
 use crate::history_cell::ReportedChecklistStep;
+#[cfg(test)]
 use crate::history_cell::plain_lines;
+#[cfg(test)]
 use crate::history_cell::render_reported_checklist;
+#[cfg(test)]
 use crate::render::line_utils::push_owned_lines;
+#[cfg(test)]
 use crate::text_formatting::truncate_text;
+#[cfg(test)]
 use crate::wrapping::RtOptions;
+#[cfg(test)]
 use crate::wrapping::adaptive_wrap_line;
+#[cfg(test)]
 use codex_app_server_protocol::TurnPlanStepStatus;
 use codex_protocol::ThreadId;
+#[cfg(test)]
 use codex_protocol::openai_models::ReasoningEffort;
+#[cfg(test)]
 use ratatui::prelude::*;
+#[cfg(test)]
 use ratatui::style::Styled;
 use std::collections::HashMap;
+#[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(test)]
 const MAX_NODES: usize = 64;
+#[cfg(test)]
 const MAX_DEPTH: usize = 3;
+#[cfg(test)]
 const MAX_STEPS: usize = 3;
+#[cfg(test)]
 const MAX_ACTIVITY: usize = 2;
+#[cfg(test)]
 const MAX_LINES: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,28 +93,19 @@ pub(crate) struct AgentHierarchyEntry {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 pub(crate) struct AgentSnapshotHistoryCell {
     snapshot: AgentRuntimeSnapshot,
 }
 
+#[cfg(test)]
 impl AgentSnapshotHistoryCell {
-    #[cfg(test)]
     pub(crate) fn new(snapshot: AgentRuntimeSnapshot) -> Self {
         Self { snapshot }
     }
-
-    pub(crate) fn new_optional(snapshot: Option<AgentRuntimeSnapshot>) -> Self {
-        Self {
-            snapshot: snapshot.unwrap_or(AgentRuntimeSnapshot {
-                revision: 0,
-                last_observed_at_ms: None,
-                agents: Vec::new(),
-                omitted_agents: 0,
-            }),
-        }
-    }
 }
 
+#[cfg(test)]
 impl HistoryCell for AgentSnapshotHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
@@ -246,6 +261,7 @@ impl HistoryCell for AgentSnapshotHistoryCell {
     }
 }
 
+#[cfg(test)]
 fn append_details(lines: &mut Vec<Line<'static>>, width: u16, summary: &AgentRuntimeSummary) {
     let detail_prefix = "     ";
     if let Some(identity) = identity_label(summary) {
@@ -333,6 +349,7 @@ fn append_details(lines: &mut Vec<Line<'static>>, width: u16, summary: &AgentRun
     }
 }
 
+#[cfg(test)]
 fn cost_label(summary: &AgentRuntimeSummary) -> String {
     let Some(cost) = summary.estimated_cost.as_ref() else {
         return "est. cost unavailable".to_string();
@@ -365,6 +382,7 @@ fn cost_label(summary: &AgentRuntimeSummary) -> String {
     format!("est. {currency} {whole}.{micros:06} ({coverage}, {source})")
 }
 
+#[cfg(test)]
 fn append_line(
     lines: &mut Vec<Line<'static>>,
     width: u16,
@@ -381,11 +399,13 @@ fn append_line(
     push_owned_lines(&wrapped, lines);
 }
 
+#[cfg(test)]
 fn indent_line(mut line: Line<'static>, prefix: &str) -> Line<'static> {
     line.spans.insert(0, prefix.to_string().into());
     line
 }
 
+#[cfg(test)]
 fn summary_label(summary: &AgentRuntimeSummary) -> String {
     summary
         .agent_path
@@ -397,6 +417,7 @@ fn summary_label(summary: &AgentRuntimeSummary) -> String {
         .unwrap_or_else(|| format!("thread {}", summary.thread_id))
 }
 
+#[cfg(test)]
 fn current_plan(summary: &AgentRuntimeSummary) -> Option<&AgentPlanSnapshot> {
     if summary.active_turn_id.is_some() {
         summary.active_plan.as_ref()
@@ -514,6 +535,7 @@ pub(crate) fn ordered_agent_hierarchy(agents: &[AgentRuntimeSummary]) -> Vec<Age
     ordered
 }
 
+#[cfg(test)]
 fn lifecycle_label(summary: &AgentRuntimeSummary) -> String {
     let label = match summary.lifecycle {
         AgentLifecycle::Starting => "starting",
@@ -534,6 +556,7 @@ fn lifecycle_label(summary: &AgentRuntimeSummary) -> String {
     }
 }
 
+#[cfg(test)]
 fn lifecycle_style(lifecycle: AgentLifecycle) -> Style {
     match lifecycle {
         AgentLifecycle::NeedsApproval | AgentLifecycle::NeedsInput => {
@@ -550,6 +573,7 @@ fn lifecycle_style(lifecycle: AgentLifecycle) -> Style {
     }
 }
 
+#[cfg(test)]
 fn identity_label(summary: &AgentRuntimeSummary) -> Option<String> {
     let identity = &summary.runtime_identity;
     if identity.requested_model.is_none()
@@ -568,6 +592,7 @@ fn identity_label(summary: &AgentRuntimeSummary) -> Option<String> {
     ))
 }
 
+#[cfg(test)]
 fn effort_label(effort: Option<&ReasoningEffort>) -> String {
     effort
         .map(|effort| format!("{effort:?}").to_lowercase())

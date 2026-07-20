@@ -2,16 +2,16 @@
 source: tui/src/multi_agents.rs
 expression: snapshot
 ---
-• Spawned Robie [explorer] (gpt-5 high)
+• Spawned Robie [explorer] · /root/robie (gpt-5 high)
   └ Compute 11! and reply with just the integer result.
 
-• Sent input to Robie [explorer]
+• Sent input to Robie [explorer] · /root/robie
   └ Please continue and return the answer only.
 
-• Waiting for Robie [explorer]
+• Waiting for Robie [explorer] · /root/robie
 
 • Finished waiting
-  └ Robie [explorer]: Completed - 39916800
-    Bob [worker]: Error - tool timeout
+  └ Robie [explorer] · /root/robie: Completed - 39916800
+    Bob [worker] · /root/bob: Error - tool timeout
 
-• Closed Robie [explorer]
+• Closed Robie [explorer] · /root/robie

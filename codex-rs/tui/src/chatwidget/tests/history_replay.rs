@@ -76,6 +76,54 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
+async fn replay_batch_preindexes_later_subagent_path_for_earlier_collab_item() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id = ThreadId::new();
+    let agent_thread_id =
+        ThreadId::from_string("019dabc1-0ef5-7431-b81c-03037f51f62c").expect("valid thread id");
+    let agent_path = "/root/researcher";
+
+    chat.replay_thread_turns(
+        vec![AppServerTurn {
+            items: vec![
+                AppServerThreadItem::CollabAgentToolCall {
+                    id: "send-input".to_string(),
+                    tool: AppServerCollabAgentTool::SendInput,
+                    status: AppServerCollabAgentToolCallStatus::Completed,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![agent_thread_id.to_string()],
+                    prompt: Some("Inspect replay identity".to_string()),
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: HashMap::new(),
+                },
+                AppServerThreadItem::SubAgentActivity {
+                    id: "agent-started".to_string(),
+                    kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                    agent_thread_id: agent_thread_id.to_string(),
+                    agent_path: agent_path.to_string(),
+                },
+            ],
+            ..app_server_turn(
+                "turn-1",
+                AppServerTurnStatus::Completed,
+                /*duration_ms*/ None,
+                /*error*/ None,
+            )
+        }],
+        ReplayKind::ResumeInitialMessages,
+    );
+
+    let earlier_collab_cell = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .find(|rendered| rendered.contains("Sent input to"))
+        .expect("earlier collaboration item should render");
+    assert!(earlier_collab_cell.contains(agent_path));
+    assert!(!earlier_collab_cell.contains(&agent_thread_id.to_string()));
+}
+
+#[tokio::test]
 async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);

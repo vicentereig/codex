@@ -5,6 +5,11 @@
     reason = "pricing integrations consume this versioned contract when they can supply a quote"
 )]
 mod cost_projection;
+#[allow(
+    dead_code,
+    reason = "the focused display contract is landed before its call-site migration"
+)]
+mod display_identity;
 mod lifecycle;
 mod model;
 mod reducer;
@@ -12,14 +17,22 @@ mod snapshot;
 mod telemetry;
 mod workspace;
 
+#[allow(
+    unused_imports,
+    reason = "the focused display contract is landed before its call-site migration"
+)]
+pub(crate) use display_identity::AgentDisplayIdentity;
 pub(crate) use lifecycle::AgentRuntimeController;
 pub(crate) use model::AgentLifecycle;
-pub(crate) use snapshot::AgentSnapshotHistoryCell;
 pub(crate) use workspace::AgentWorkspace;
 
 #[cfg(test)]
 #[path = "reducer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "display_identity_tests.rs"]
+mod display_identity_tests;
 
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]

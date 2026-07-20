@@ -7,7 +7,6 @@
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::chatwidget::ThreadInputStateRestoreMode;
-use crate::multi_agents::format_agent_picker_item_name;
 use crate::session_resume::read_session_model;
 
 impl App {
@@ -126,28 +125,16 @@ impl App {
 
     pub(super) fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
-        let fallback_label = if is_primary {
-            "Main [default]".to_string()
-        } else {
-            let thread_id = thread_id.to_string();
-            let short_id: String = thread_id.chars().take(8).collect();
-            format!("Agent ({short_id})")
-        };
+        if is_primary {
+            return "Main [default]".to_string();
+        }
         if let Some(entry) = self.agent_navigation.get(&thread_id) {
-            let label = format_agent_picker_item_name(
-                entry.agent_nickname.as_deref(),
-                entry.agent_role.as_deref(),
-                is_primary,
-            );
-            if label == "Agent" {
-                let thread_id = thread_id.to_string();
-                let short_id: String = thread_id.chars().take(8).collect();
-                format!("{label} ({short_id})")
-            } else {
-                label
-            }
+            entry.display_identity(thread_id).contextual_label()
         } else {
-            fallback_label
+            crate::agent_runtime::AgentDisplayIdentity::new(
+                thread_id, /*agent_path*/ None, /*nickname*/ None, /*role*/ None,
+            )
+            .contextual_label()
         }
     }
 
@@ -453,8 +440,9 @@ impl App {
             return Ok(());
         }
 
+        let label = self.thread_label(thread_id);
         self.chat_widget
-            .add_error_message(format!("Not available in TUI yet for thread {thread_id}."));
+            .add_error_message(format!("{label} is not available in the TUI yet."));
         Ok(())
     }
 
@@ -854,8 +842,9 @@ impl App {
                 Ok(true)
             }
             Err(err) => {
+                let label = self.thread_label(thread_id);
                 self.chat_widget.add_error_message(format!(
-                    "Failed to resolve app-server request for thread {thread_id}: {err}"
+                    "Failed to resolve the app-server request for {label}: {err}"
                 ));
                 Ok(false)
             }
@@ -1003,7 +992,9 @@ impl App {
         if let Some(activity) =
             sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
         {
+            let thread_id = activity.thread_id;
             self.agent_navigation.record_sub_agent_activity(activity);
+            self.sync_collab_agent_identity(thread_id);
             self.sync_active_agent_label();
             return;
         }
@@ -1406,6 +1397,13 @@ impl App {
         resume_restored_queue: bool,
     ) {
         self.refresh_mcp_startup_expected_servers_from_config();
+        for event in &snapshot.events {
+            if let ThreadBufferedEvent::Notification(notification) = event
+                && let Some(item) = sub_agent_activity_item(notification)
+            {
+                self.chat_widget.cache_sub_agent_identity_from_item(item);
+            }
+        }
         let should_buffer_replay = !snapshot.turns.is_empty() || !snapshot.events.is_empty();
         if should_buffer_replay {
             self.app_event_tx
@@ -1580,6 +1578,7 @@ impl App {
             && let Some((closed_thread_id, primary_thread_id)) =
                 self.active_non_primary_shutdown_target(notification)
         {
+            let closed_label = self.thread_label(closed_thread_id);
             self.mark_agent_picker_thread_closed(closed_thread_id);
             if self.side_threads.contains_key(&closed_thread_id) {
                 self.discard_closed_side_thread(closed_thread_id).await;
@@ -1591,15 +1590,14 @@ impl App {
             }
             if self.active_thread_id == Some(primary_thread_id) {
                 self.chat_widget.add_info_message(
-                    format!(
-                        "Agent thread {closed_thread_id} closed. Switched back to main thread."
-                    ),
+                    format!("{closed_label} closed. Switched back to Main."),
                     /*hint*/ None,
                 );
             } else {
                 self.clear_active_thread().await;
+                let primary_label = self.thread_label(primary_thread_id);
                 self.chat_widget.add_error_message(format!(
-                    "Agent thread {closed_thread_id} closed. Failed to switch back to main thread {primary_thread_id}.",
+                    "{closed_label} closed. Failed to switch back to {primary_label}.",
                 ));
             }
             return Ok(());

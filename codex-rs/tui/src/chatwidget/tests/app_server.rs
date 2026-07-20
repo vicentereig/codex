@@ -441,6 +441,7 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
         spawned_thread_id,
         Some("Robie".to_string()),
         Some("explorer".to_string()),
+        Some("/root/robie".to_string()),
     );
 
     chat.handle_server_notification(
@@ -496,7 +497,7 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
         .join("\n");
 
     assert!(
-        rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
+        rendered.contains("Spawned Robie [explorer] · /root/robie (gpt-5 high)"),
         "expected spawn line to include agent metadata and requested model, got {rendered:?}"
     );
 }
@@ -918,11 +919,13 @@ async fn live_app_server_collab_wait_items_render_history() {
         receiver_thread_id,
         Some("Robie".to_string()),
         Some("explorer".to_string()),
+        Some("/root/robie".to_string()),
     );
     chat.set_collab_agent_metadata(
         other_receiver_thread_id,
         Some("Ada".to_string()),
         Some("reviewer".to_string()),
+        Some("/root/ada".to_string()),
     );
 
     chat.handle_server_notification(
