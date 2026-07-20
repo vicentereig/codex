@@ -75,12 +75,9 @@ pub(crate) async fn initialize_authority_with(
     fresh_after_corruption: Option<FreshAfterCorruption>,
     injector: &dyn AuthorityFailureInjector,
 ) -> anyhow::Result<CoordinationAuthorityStatus> {
-    let mut connection = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let result = initialize_authority_transaction(
-        &mut connection,
+        &mut transaction,
         sqlite_home,
         fresh_after_corruption,
         injector,
@@ -88,11 +85,11 @@ pub(crate) async fn initialize_authority_with(
     .await;
     match result {
         Ok(status) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            transaction.commit().await?;
             Ok(status)
         }
         Err(err) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            transaction.rollback().await?;
             Err(err)
         }
     }

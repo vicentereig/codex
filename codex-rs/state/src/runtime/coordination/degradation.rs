@@ -38,7 +38,7 @@ pub(super) async fn record_exogenous_terminal_degradation_with(
     };
     let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = record_checked(&mut connection, &observation, injector).await;
-    recovery_guard::finish_with(&mut connection, result, injector).await
+    recovery_guard::finish_with(connection, result, injector).await
 }
 
 pub(super) async fn record_checked(

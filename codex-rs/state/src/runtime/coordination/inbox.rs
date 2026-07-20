@@ -1,4 +1,5 @@
-use sqlx::SqliteConnection;
+use sqlx::Sqlite;
+use sqlx::Transaction;
 
 use super::aggregate_journal::AggregateFailureInjector;
 use super::aggregate_journal::AggregateStep;
@@ -144,23 +145,23 @@ impl StateRuntime {
     ) -> Result<PersistRecipientReceiptOutcome, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = persist_receipt(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 
     pub(super) async fn begin_inbox(
         &self,
         injector: &dyn InboxFailureInjector,
-    ) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, InboxWriteError> {
-        let mut connection = self.pool.acquire().await.map_err(internal)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
+    ) -> Result<Transaction<'static, Sqlite>, InboxWriteError> {
+        let transaction = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(internal)?;
         if let Err(error) = injector.after_inbox_step(InboxStep::TransactionBegin) {
-            rollback_inbox(&mut connection, injector).await?;
+            rollback_inbox(transaction, injector).await?;
             return Err(internal(error));
         }
-        Ok(connection)
+        Ok(transaction)
     }
 
     pub(crate) async fn coordination_durable_receipt_ack(
@@ -181,40 +182,34 @@ impl StateRuntime {
 }
 
 pub(super) async fn finish_inbox<T>(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     result: Result<T, InboxWriteError>,
     injector: &dyn InboxFailureInjector,
 ) -> Result<T, InboxWriteError> {
     match result {
         Ok(value) => {
             if let Err(error) = injector.after_step(AggregateStep::BeforeCommit) {
-                rollback_inbox(connection, injector).await?;
+                rollback_inbox(transaction, injector).await?;
                 return Err(internal(error));
             }
-            sqlx::query("COMMIT")
-                .execute(&mut *connection)
-                .await
-                .map_err(internal)?;
+            transaction.commit().await.map_err(internal)?;
             injector
                 .after_step(AggregateStep::AfterCommit)
                 .map_err(internal)?;
             Ok(value)
         }
         Err(error) => {
-            rollback_inbox(connection, injector).await?;
+            rollback_inbox(transaction, injector).await?;
             Err(error)
         }
     }
 }
 
 async fn rollback_inbox(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     injector: &dyn InboxFailureInjector,
 ) -> Result<(), InboxWriteError> {
-    sqlx::query("ROLLBACK")
-        .execute(&mut *connection)
-        .await
-        .map_err(internal)?;
+    transaction.rollback().await.map_err(internal)?;
     injector
         .after_inbox_step(InboxStep::Rollback)
         .map_err(internal)

@@ -53,7 +53,7 @@ impl StateRuntime {
             injector,
         )
         .await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 
     pub(crate) async fn begin_coordination_command_attempt(
@@ -73,7 +73,7 @@ impl StateRuntime {
     ) -> Result<BegunCommandAttempt, CommandWriteError> {
         let mut connection = begin_command(self, injector).await?;
         let result = begin_attempt(&mut connection, lease, now_ms, injector).await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 
     pub(crate) async fn resolve_coordination_command_attempt(
@@ -100,7 +100,7 @@ impl StateRuntime {
     ) -> Result<ResolveCommandAttemptOutcome, CommandWriteError> {
         let mut connection = begin_command(self, injector).await?;
         let result = resolve(&mut connection, attempt, resolution, now_ms, injector).await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 
     pub(crate) async fn reclaim_expired_coordination_command_leases(
@@ -121,7 +121,7 @@ impl StateRuntime {
         maintenance_limit(limit)?;
         let mut connection = begin_command(self, injector).await?;
         let result = reclaim(&mut connection, now_ms, limit, injector).await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 
     pub(crate) async fn expire_coordination_command_payloads(
@@ -142,7 +142,7 @@ impl StateRuntime {
         maintenance_limit(limit)?;
         let mut connection = begin_command(self, injector).await?;
         let result = expire(&mut connection, now_ms, limit, injector).await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 }
 

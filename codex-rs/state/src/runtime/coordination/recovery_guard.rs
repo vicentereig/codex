@@ -1,8 +1,10 @@
 use codex_coordination::StateEpoch;
 use codex_protocol::ThreadId;
 use sqlx::Row;
+use sqlx::Sqlite;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
+use sqlx::Transaction;
 use std::path::Path;
 
 use super::authority_marker::MARKER_FILE_NAME;
@@ -127,43 +129,47 @@ pub(super) async fn validate_anchor_with(
 async fn begin(
     pool: &sqlx::SqlitePool,
     injector: &dyn RecoveryFailureInjector,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, RecoveryWriteError> {
-    let mut connection = pool
-        .acquire()
-        .await
-        .map_err(|_| RecoveryWriteError::Deferred)?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
+) -> Result<Transaction<'static, Sqlite>, RecoveryWriteError> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|_| RecoveryWriteError::Deferred)?;
     if let Err(error) = injector.after_recovery_step(RecoveryStep::TransactionBegin) {
-        return rollback_after_begin(
-            &mut connection,
-            injector,
-            RecoveryWriteError::Internal(error),
-        )
-        .await;
+        return rollback_after_begin(transaction, injector, RecoveryWriteError::Internal(error))
+            .await;
     }
-    match verify_marker(&mut connection, injector).await {
-        Ok(MarkerPreflight::Verified) => Ok(connection),
-        Ok(MarkerPreflight::Committed(error)) => Err(error),
-        Err(error) => rollback_after_begin(&mut connection, injector, error).await,
+    match verify_marker(&mut transaction, injector).await {
+        Ok(MarkerPreflight::Verified) => Ok(transaction),
+        Ok(MarkerPreflight::NeedsQuarantineCommit) => {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RecoveryWriteError::Deferred)?;
+            match injector.after_recovery_step(RecoveryStep::MarkerCommit) {
+                Ok(()) => Err(RecoveryWriteError::Quarantined),
+                Err(error) => Err(RecoveryWriteError::Internal(error)),
+            }
+        }
+        Err(error) => rollback_after_begin(transaction, injector, error).await,
     }
 }
 
 pub(super) async fn begin_with(
     pool: &SqlitePool,
     injector: &dyn RecoveryFailureInjector,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, RecoveryWriteError> {
+) -> Result<Transaction<'static, Sqlite>, RecoveryWriteError> {
     begin(pool, injector).await
 }
 
 async fn rollback_after_begin<T>(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     injector: &dyn RecoveryFailureInjector,
     error: RecoveryWriteError,
 ) -> Result<T, RecoveryWriteError> {
-    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+    transaction
+        .rollback()
+        .await
+        .map_err(|_| RecoveryWriteError::Deferred)?;
     injector
         .after_recovery_step(RecoveryStep::Rollback)
         .map_err(RecoveryWriteError::Internal)?;
@@ -226,57 +232,55 @@ async fn verify_marker(
     injector
         .after_recovery_step(RecoveryStep::MarkerUpdate)
         .map_err(RecoveryWriteError::Internal)?;
-    sqlx::query("COMMIT")
-        .execute(&mut *connection)
-        .await
-        .map_err(|_| RecoveryWriteError::Deferred)?;
-    let outcome = match injector.after_recovery_step(RecoveryStep::MarkerCommit) {
-        Ok(()) => RecoveryWriteError::Quarantined,
-        Err(error) => RecoveryWriteError::Internal(error),
-    };
-    Ok(MarkerPreflight::Committed(outcome))
+    Ok(MarkerPreflight::NeedsQuarantineCommit)
 }
 
 enum MarkerPreflight {
     Verified,
-    Committed(RecoveryWriteError),
+    NeedsQuarantineCommit,
 }
 
 pub(super) async fn finish<T>(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     result: Result<T, RecoveryWriteError>,
 ) -> Result<T, RecoveryWriteError> {
     match result {
         Ok(value) => {
-            sqlx::query("COMMIT")
-                .execute(&mut *connection)
+            transaction
+                .commit()
                 .await
                 .map_err(|_| RecoveryWriteError::Deferred)?;
             Ok(value)
         }
         Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| RecoveryWriteError::Deferred)?;
             Err(error)
         }
     }
 }
 
 pub(super) async fn finish_with<T>(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     result: Result<T, RecoveryWriteError>,
     injector: &dyn RecoveryFailureInjector,
 ) -> Result<T, RecoveryWriteError> {
     match result {
         Ok(value) => {
             if let Err(error) = injector.after_recovery_step(RecoveryStep::BeforeCommit) {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| RecoveryWriteError::Deferred)?;
                 injector
                     .after_recovery_step(RecoveryStep::Rollback)
                     .map_err(RecoveryWriteError::Internal)?;
                 return Err(RecoveryWriteError::Internal(error));
             }
-            sqlx::query("COMMIT")
-                .execute(&mut *connection)
+            transaction
+                .commit()
                 .await
                 .map_err(|_| RecoveryWriteError::Deferred)?;
             injector
@@ -285,7 +289,10 @@ pub(super) async fn finish_with<T>(
             Ok(value)
         }
         Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            transaction
+                .rollback()
+                .await
+                .map_err(|_| RecoveryWriteError::Deferred)?;
             injector
                 .after_recovery_step(RecoveryStep::Rollback)
                 .map_err(RecoveryWriteError::Internal)?;

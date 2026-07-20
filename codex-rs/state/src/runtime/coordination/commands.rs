@@ -124,7 +124,7 @@ impl StateRuntime {
     ) -> Result<RecordCoordinationCommandOutcome, CommandWriteError> {
         let mut connection = begin_command(self, injector).await?;
         let result = record(&mut connection, params, injector).await;
-        finish_command(&mut connection, result, injector).await
+        finish_command(connection, result, injector).await
     }
 }
 

@@ -101,7 +101,7 @@ pub(super) async fn claim_degradation_publications_with(
         Ok(ClaimDegradationPublicationsOutcome::Claimed(claimed))
     }
     .await;
-    match recovery_guard::finish_with(&mut connection, result, injector).await {
+    match recovery_guard::finish_with(connection, result, injector).await {
         Err(RecoveryWriteError::Deferred) => Ok(ClaimDegradationPublicationsOutcome::Deferred),
         result => result,
     }
@@ -237,7 +237,7 @@ pub(super) async fn resolve_degradation_publication_with(
         )?))
     }
     .await;
-    recovery_guard::finish_with(&mut connection, result, injector).await
+    recovery_guard::finish_with(connection, result, injector).await
 }
 
 fn status(value: &str) -> Result<DegradationPublicationStatus, RecoveryWriteError> {

@@ -28,7 +28,7 @@ pub(super) async fn record_legacy_link_with(
 ) -> Result<RecordLegacyLinkOutcome, RecoveryWriteError> {
     let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = record_legacy_link_in_with(&mut connection, link, injector).await;
-    recovery_guard::finish_with(&mut connection, result, injector).await
+    recovery_guard::finish_with(connection, result, injector).await
 }
 
 pub(super) async fn record_legacy_link_in(

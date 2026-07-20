@@ -152,7 +152,7 @@ pub(super) async fn recover_coordination_batch_with(
         Ok(RecoveryBatch { dispositions })
     }
     .await;
-    recovery_guard::finish_with(&mut connection, result, injector).await
+    recovery_guard::finish_with(connection, result, injector).await
 }
 
 fn remaining(limit: u32, completed: usize) -> u32 {

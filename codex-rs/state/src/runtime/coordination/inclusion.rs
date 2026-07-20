@@ -33,7 +33,7 @@ impl StateRuntime {
     ) -> Result<ClaimInboxReceiptOutcome, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = claim_receipt(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 
     pub(crate) async fn record_coordination_inclusion_selection(
@@ -51,7 +51,7 @@ impl StateRuntime {
     ) -> Result<RecordInboxSelectionOutcome, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = record_selection(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 
     pub(crate) async fn record_coordination_inbox_transport_outcome(
@@ -69,7 +69,7 @@ impl StateRuntime {
     ) -> Result<RecordInboxTransportOutcomeResult, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = record_transport_outcome(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 
     pub(crate) async fn reclaim_expired_coordination_inbox_leases(
@@ -87,7 +87,7 @@ impl StateRuntime {
     ) -> Result<InboxMaintenanceOutcome, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = reclaim_leases(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 
     pub(crate) async fn expire_coordination_inbox_payloads(
@@ -105,6 +105,6 @@ impl StateRuntime {
     ) -> Result<InboxMaintenanceOutcome, InboxWriteError> {
         let mut connection = self.begin_inbox(injector).await?;
         let result = expire_payloads(&mut connection, params, injector).await;
-        finish_inbox(&mut connection, result, injector).await
+        finish_inbox(connection, result, injector).await
     }
 }

@@ -33,7 +33,7 @@ pub(super) async fn advance_legacy_scan_checkpoint_with(
     page.validate()?;
     let mut connection = recovery_guard::begin_with(pool, injector).await?;
     let result = advance_in(&mut connection, page, injector).await;
-    recovery_guard::finish_with(&mut connection, result, injector).await
+    recovery_guard::finish_with(connection, result, injector).await
 }
 
 async fn advance_in(

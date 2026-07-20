@@ -165,5 +165,8 @@ mod recovery_storage_tests;
 #[path = "recovery_test_support.rs"]
 mod recovery_test_support;
 #[cfg(test)]
+#[path = "transaction_raii_tests.rs"]
+mod transaction_raii_tests;
+#[cfg(test)]
 #[path = "transaction_seam_tests.rs"]
 mod transaction_seam_tests;

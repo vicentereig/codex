@@ -12,7 +12,9 @@ use codex_coordination::MAX_ID_BYTES;
 use codex_coordination::StateEpoch;
 use codex_protocol::ThreadId;
 use sqlx::Row;
+use sqlx::Sqlite;
 use sqlx::SqliteConnection;
+use sqlx::Transaction;
 
 pub(super) use super::aggregate_event::compare_event;
 pub(super) use super::aggregate_event::make_event;
@@ -136,40 +138,34 @@ fn idempotency_key(
 }
 
 pub(super) async fn finish<T>(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     result: Result<T, CoordinationWriteError>,
     injector: &dyn AggregateFailureInjector,
 ) -> Result<T, CoordinationWriteError> {
     match result {
         Ok(value) => {
             if let Err(err) = injector.after_step(AggregateStep::BeforeCommit) {
-                rollback(connection, injector).await?;
+                rollback(transaction, injector).await?;
                 return Err(internal(err));
             }
-            sqlx::query("COMMIT")
-                .execute(&mut *connection)
-                .await
-                .map_err(internal)?;
+            transaction.commit().await.map_err(internal)?;
             injector
                 .after_step(AggregateStep::AfterCommit)
                 .map_err(internal)?;
             Ok(value)
         }
         Err(err) => {
-            rollback(connection, injector).await?;
+            rollback(transaction, injector).await?;
             Err(err)
         }
     }
 }
 
 pub(super) async fn rollback(
-    connection: &mut SqliteConnection,
+    transaction: Transaction<'static, Sqlite>,
     injector: &dyn AggregateFailureInjector,
 ) -> Result<(), CoordinationWriteError> {
-    sqlx::query("ROLLBACK")
-        .execute(&mut *connection)
-        .await
-        .map_err(internal)?;
+    transaction.rollback().await.map_err(internal)?;
     injector
         .after_step(AggregateStep::Rollback)
         .map_err(internal)
