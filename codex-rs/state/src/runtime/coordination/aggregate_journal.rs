@@ -53,6 +53,8 @@ pub(crate) enum CoordinationWriteError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AggregateStep {
+    TransactionBegin,
+    Rollback,
     AuthorityRead,
     IdempotencyRead,
     AggregateRead,
@@ -141,7 +143,7 @@ pub(super) async fn finish<T>(
     match result {
         Ok(value) => {
             if let Err(err) = injector.after_step(AggregateStep::BeforeCommit) {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                rollback(connection, injector).await?;
                 return Err(internal(err));
             }
             sqlx::query("COMMIT")
@@ -154,10 +156,23 @@ pub(super) async fn finish<T>(
             Ok(value)
         }
         Err(err) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            rollback(connection, injector).await?;
             Err(err)
         }
     }
+}
+
+pub(super) async fn rollback(
+    connection: &mut SqliteConnection,
+    injector: &dyn AggregateFailureInjector,
+) -> Result<(), CoordinationWriteError> {
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .map_err(internal)?;
+    injector
+        .after_step(AggregateStep::Rollback)
+        .map_err(internal)
 }
 
 pub(super) async fn authority(

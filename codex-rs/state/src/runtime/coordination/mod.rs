@@ -12,6 +12,7 @@ mod command_identity;
 mod command_leases;
 mod command_recovery;
 mod command_rows;
+mod command_transaction;
 mod commands;
 mod degradation;
 mod degradation_integrity;
@@ -160,3 +161,6 @@ mod recovery_storage_tests;
 #[cfg(test)]
 #[path = "recovery_test_support.rs"]
 mod recovery_test_support;
+#[cfg(test)]
+#[path = "transaction_seam_tests.rs"]
+mod transaction_seam_tests;

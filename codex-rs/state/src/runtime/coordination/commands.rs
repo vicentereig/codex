@@ -15,6 +15,8 @@ use super::command_event::expected_event_kind;
 use super::command_identity::preflight_identity;
 use super::command_identity::validate_stored_tuple;
 use super::command_rows::*;
+use super::command_transaction::begin_command;
+use super::command_transaction::finish_command;
 use super::reserve_transition::reserve;
 use crate::StateRuntime;
 use crate::model::coordination::NativeEventContext;
@@ -120,11 +122,7 @@ impl StateRuntime {
         params: RecordCoordinationCommand,
         injector: &dyn CommandFailureInjector,
     ) -> Result<RecordCoordinationCommandOutcome, CommandWriteError> {
-        let mut connection = self.pool.acquire().await.map_err(internal_command)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await
-            .map_err(internal_command)?;
+        let mut connection = begin_command(self, injector).await?;
         let result = record(&mut connection, params, injector).await;
         finish_command(&mut connection, result, injector).await
     }

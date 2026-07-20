@@ -178,6 +178,8 @@ impl InboxFailureInjector for RecoveryInboxFailure<'_> {
                 RecoveryStep::RecoveryUpdate
             }
             InboxStep::DuplicateRead
+            | InboxStep::TransactionBegin
+            | InboxStep::Rollback
             | InboxStep::CommandRead
             | InboxStep::TargetFence
             | InboxStep::ReceiptEvent

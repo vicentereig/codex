@@ -63,7 +63,7 @@ async fn command_trace_reopens_at_every_counted_boundary_and_converges() -> anyh
         RecordCoordinationCommandOutcome::Applied(_)
     ));
     let trace = recorder.trace();
-    assert_eq!(trace.len(), 17);
+    assert_eq!(trace.len(), 18);
     assert!(trace.iter().any(|point| {
         point
             == &CrashPoint {
@@ -147,7 +147,7 @@ async fn recipient_trace_reopens_at_every_counted_boundary_and_converges() -> an
         PersistRecipientReceiptOutcome::Applied(_)
     ));
     let trace = recorder.trace();
-    assert_eq!(trace.len(), 23);
+    assert_eq!(trace.len(), 24);
     assert!(trace.iter().any(|point| {
         point
             == &CrashPoint {

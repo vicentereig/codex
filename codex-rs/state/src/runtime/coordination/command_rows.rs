@@ -14,8 +14,6 @@ use sha2::Sha256;
 use sqlx::Row;
 use sqlx::SqliteConnection;
 
-use super::aggregate_journal::AggregateStep;
-use super::commands::CommandFailureInjector;
 use super::commands::CommandWriteError;
 use crate::model::coordination_commands::CapturedCommandTarget;
 use crate::model::coordination_commands::CapturedGenerationSet;
@@ -288,39 +286,6 @@ pub(super) fn failure_code_sql(code: CoordinationFailureCode) -> &'static str {
         CoordinationFailureCode::RetryExhausted => "retryExhausted",
         CoordinationFailureCode::CorruptEvidence => "corruptEvidence",
         CoordinationFailureCode::Internal => "internal",
-    }
-}
-
-pub(super) async fn finish_command<T>(
-    connection: &mut SqliteConnection,
-    result: Result<T, CommandWriteError>,
-    injector: &dyn CommandFailureInjector,
-) -> Result<T, CommandWriteError> {
-    match result {
-        Ok(value) => {
-            if let Err(error) = injector.after_step(AggregateStep::BeforeCommit) {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-                injector
-                    .after_command_step(super::commands::CommandStep::Rollback)
-                    .map_err(internal)?;
-                return Err(internal(error));
-            }
-            sqlx::query("COMMIT")
-                .execute(&mut *connection)
-                .await
-                .map_err(internal)?;
-            injector
-                .after_step(AggregateStep::AfterCommit)
-                .map_err(internal)?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-            injector
-                .after_command_step(super::commands::CommandStep::Rollback)
-                .map_err(internal)?;
-            Err(error)
-        }
     }
 }
 

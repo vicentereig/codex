@@ -2,6 +2,8 @@ use codex_coordination::CoordinationOperationId;
 use sqlx::SqliteConnection;
 
 use super::command_rows::*;
+use super::command_transaction::begin_command;
+use super::command_transaction::finish_command;
 use super::commands::CommandFailureInjector;
 use super::commands::CommandStep;
 use super::commands::CommandWriteError;
@@ -40,7 +42,7 @@ impl StateRuntime {
         requested_lease_deadline_ms: i64,
         injector: &dyn CommandFailureInjector,
     ) -> Result<ClaimCoordinationCommandOutcome, CommandWriteError> {
-        let mut connection = begin(self, injector).await?;
+        let mut connection = begin_command(self, injector).await?;
         let result = claim(
             &mut connection,
             operation_id,
@@ -69,7 +71,7 @@ impl StateRuntime {
         now_ms: i64,
         injector: &dyn CommandFailureInjector,
     ) -> Result<BegunCommandAttempt, CommandWriteError> {
-        let mut connection = begin(self, injector).await?;
+        let mut connection = begin_command(self, injector).await?;
         let result = begin_attempt(&mut connection, lease, now_ms, injector).await;
         finish_command(&mut connection, result, injector).await
     }
@@ -96,7 +98,7 @@ impl StateRuntime {
         now_ms: i64,
         injector: &dyn CommandFailureInjector,
     ) -> Result<ResolveCommandAttemptOutcome, CommandWriteError> {
-        let mut connection = begin(self, injector).await?;
+        let mut connection = begin_command(self, injector).await?;
         let result = resolve(&mut connection, attempt, resolution, now_ms, injector).await;
         finish_command(&mut connection, result, injector).await
     }
@@ -117,7 +119,7 @@ impl StateRuntime {
         injector: &dyn CommandFailureInjector,
     ) -> Result<u64, CommandWriteError> {
         maintenance_limit(limit)?;
-        let mut connection = begin(self, injector).await?;
+        let mut connection = begin_command(self, injector).await?;
         let result = reclaim(&mut connection, now_ms, limit, injector).await;
         finish_command(&mut connection, result, injector).await
     }
@@ -138,7 +140,7 @@ impl StateRuntime {
         injector: &dyn CommandFailureInjector,
     ) -> Result<u64, CommandWriteError> {
         maintenance_limit(limit)?;
-        let mut connection = begin(self, injector).await?;
+        let mut connection = begin_command(self, injector).await?;
         let result = expire(&mut connection, now_ms, limit, injector).await;
         finish_command(&mut connection, result, injector).await
     }
@@ -564,28 +566,6 @@ async fn expire_one(
     .await
     .map_err(internal)?;
     Ok(())
-}
-
-async fn begin(
-    runtime: &StateRuntime,
-    injector: &dyn CommandFailureInjector,
-) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, CommandWriteError> {
-    let mut connection = runtime.pool.acquire().await.map_err(internal)?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await
-        .map_err(internal)?;
-    if let Err(error) = injector.after_command_step(CommandStep::TransactionBegin) {
-        sqlx::query("ROLLBACK")
-            .execute(&mut *connection)
-            .await
-            .map_err(internal)?;
-        injector
-            .after_command_step(CommandStep::Rollback)
-            .map_err(internal)?;
-        return Err(internal(error));
-    }
-    Ok(connection)
 }
 
 async fn ensure_active(connection: &mut SqliteConnection) -> Result<(), CommandWriteError> {

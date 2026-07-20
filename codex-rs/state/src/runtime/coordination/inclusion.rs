@@ -2,7 +2,6 @@ use super::inbox::InboxFailureInjector;
 use super::inbox::InboxWriteError;
 use super::inbox::NoInboxFailure;
 use super::inbox::finish_inbox;
-use super::inbox::internal;
 use super::inbox_claim::claim_receipt;
 use super::inbox_maintenance::expire_payloads;
 use super::inbox_maintenance::reclaim_leases;
@@ -32,7 +31,7 @@ impl StateRuntime {
         params: ClaimInboxReceipt,
         injector: &dyn InboxFailureInjector,
     ) -> Result<ClaimInboxReceiptOutcome, InboxWriteError> {
-        let mut connection = self.begin_inbox().await?;
+        let mut connection = self.begin_inbox(injector).await?;
         let result = claim_receipt(&mut connection, params, injector).await;
         finish_inbox(&mut connection, result, injector).await
     }
@@ -50,7 +49,7 @@ impl StateRuntime {
         params: RecordInboxSelection,
         injector: &dyn InboxFailureInjector,
     ) -> Result<RecordInboxSelectionOutcome, InboxWriteError> {
-        let mut connection = self.begin_inbox().await?;
+        let mut connection = self.begin_inbox(injector).await?;
         let result = record_selection(&mut connection, params, injector).await;
         finish_inbox(&mut connection, result, injector).await
     }
@@ -68,7 +67,7 @@ impl StateRuntime {
         params: RecordInboxTransportOutcome,
         injector: &dyn InboxFailureInjector,
     ) -> Result<RecordInboxTransportOutcomeResult, InboxWriteError> {
-        let mut connection = self.begin_inbox().await?;
+        let mut connection = self.begin_inbox(injector).await?;
         let result = record_transport_outcome(&mut connection, params, injector).await;
         finish_inbox(&mut connection, result, injector).await
     }
@@ -86,7 +85,7 @@ impl StateRuntime {
         params: InboxMaintenanceBatch,
         injector: &dyn InboxFailureInjector,
     ) -> Result<InboxMaintenanceOutcome, InboxWriteError> {
-        let mut connection = self.begin_inbox().await?;
+        let mut connection = self.begin_inbox(injector).await?;
         let result = reclaim_leases(&mut connection, params, injector).await;
         finish_inbox(&mut connection, result, injector).await
     }
@@ -104,19 +103,8 @@ impl StateRuntime {
         params: InboxMaintenanceBatch,
         injector: &dyn InboxFailureInjector,
     ) -> Result<InboxMaintenanceOutcome, InboxWriteError> {
-        let mut connection = self.begin_inbox().await?;
+        let mut connection = self.begin_inbox(injector).await?;
         let result = expire_payloads(&mut connection, params, injector).await;
         finish_inbox(&mut connection, result, injector).await
-    }
-
-    async fn begin_inbox(
-        &self,
-    ) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, InboxWriteError> {
-        let mut connection = self.pool.acquire().await.map_err(internal)?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await
-            .map_err(internal)?;
-        Ok(connection)
     }
 }

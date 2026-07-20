@@ -56,7 +56,7 @@ impl StateRuntime {
         params: ReserveAssignment,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<ReserveAssignmentOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = reserve(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
@@ -74,7 +74,7 @@ impl StateRuntime {
         params: AcceptAssignment,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<AssignmentTransitionOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = accept(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
@@ -92,7 +92,7 @@ impl StateRuntime {
         params: CloseReservedAssignment,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<AssignmentTransitionOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = close_reserved(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
@@ -110,7 +110,7 @@ impl StateRuntime {
         params: TerminalAssignment,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<AssignmentTransitionOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = terminal(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
@@ -127,7 +127,7 @@ impl StateRuntime {
         params: StartCoordinationWait,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<WaitTransitionOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = start_wait(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
@@ -144,19 +144,24 @@ impl StateRuntime {
         params: EndCoordinationWait,
         injector: &dyn AggregateFailureInjector,
     ) -> Result<WaitTransitionOutcome, CoordinationWriteError> {
-        let mut connection = self.begin().await?;
+        let mut connection = self.begin_aggregate(injector).await?;
         let result = end_wait(&mut connection, params, injector).await;
         finish(&mut connection, result, injector).await
     }
 
-    async fn begin(
+    async fn begin_aggregate(
         &self,
+        injector: &dyn AggregateFailureInjector,
     ) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, CoordinationWriteError> {
         let mut connection = self.pool.acquire().await.map_err(internal)?;
         sqlx::query("BEGIN IMMEDIATE")
             .execute(&mut *connection)
             .await
             .map_err(internal)?;
+        if let Err(error) = injector.after_step(AggregateStep::TransactionBegin) {
+            rollback(&mut connection, injector).await?;
+            return Err(internal(error));
+        }
         Ok(connection)
     }
 }
