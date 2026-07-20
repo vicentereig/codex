@@ -120,6 +120,12 @@ mod failure_injection_integrity;
 #[path = "failure_injection_integrity_tests.rs"]
 mod failure_injection_integrity_tests;
 #[cfg(test)]
+#[path = "failure_injection_recovery_outbox_matrix_support.rs"]
+mod failure_injection_recovery_outbox_matrix_support;
+#[cfg(test)]
+#[path = "failure_injection_recovery_outbox_matrix_tests.rs"]
+mod failure_injection_recovery_outbox_matrix_tests;
+#[cfg(test)]
 #[path = "failure_injection_recovery_semantic_matrix_support.rs"]
 mod failure_injection_recovery_semantic_matrix_support;
 #[cfg(test)]
