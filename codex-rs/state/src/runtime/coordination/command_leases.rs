@@ -1,0 +1,439 @@
+use codex_coordination::CoordinationOperationId;
+use sqlx::SqliteConnection;
+
+use super::command_rows::*;
+use super::commands::CommandWriteError;
+use crate::StateRuntime;
+use crate::model::coordination_commands::*;
+
+const MAX_MAINTENANCE_BATCH: u32 = 256;
+
+impl StateRuntime {
+    pub(crate) async fn claim_coordination_command(
+        &self,
+        operation_id: CoordinationOperationId,
+        expected_version: u64,
+        expected_lease_epoch: u64,
+        now_ms: i64,
+        requested_lease_deadline_ms: i64,
+    ) -> Result<ClaimCoordinationCommandOutcome, CommandWriteError> {
+        let mut connection = begin(self).await?;
+        let result = claim(
+            &mut connection,
+            operation_id,
+            expected_version,
+            expected_lease_epoch,
+            now_ms,
+            requested_lease_deadline_ms,
+        )
+        .await;
+        finish(&mut connection, result).await
+    }
+
+    pub(crate) async fn begin_coordination_command_attempt(
+        &self,
+        lease: CommandLeaseToken,
+        now_ms: i64,
+    ) -> Result<BegunCommandAttempt, CommandWriteError> {
+        let mut connection = begin(self).await?;
+        let result = begin_attempt(&mut connection, lease, now_ms).await;
+        finish(&mut connection, result).await
+    }
+
+    pub(crate) async fn resolve_coordination_command_attempt(
+        &self,
+        attempt: BegunCommandAttempt,
+        resolution: CommandAttemptResolution,
+        now_ms: i64,
+    ) -> Result<ResolveCommandAttemptOutcome, CommandWriteError> {
+        let mut connection = begin(self).await?;
+        let result = resolve(&mut connection, attempt, resolution, now_ms).await;
+        finish(&mut connection, result).await
+    }
+
+    pub(crate) async fn reclaim_expired_coordination_command_leases(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<u64, CommandWriteError> {
+        maintenance_limit(limit)?;
+        let mut connection = begin(self).await?;
+        let result = reclaim(&mut connection, now_ms, limit).await;
+        finish(&mut connection, result).await
+    }
+
+    pub(crate) async fn expire_coordination_command_payloads(
+        &self,
+        now_ms: i64,
+        limit: u32,
+    ) -> Result<u64, CommandWriteError> {
+        maintenance_limit(limit)?;
+        let mut connection = begin(self).await?;
+        let result = expire(&mut connection, now_ms, limit).await;
+        finish(&mut connection, result).await
+    }
+}
+
+async fn claim(
+    connection: &mut SqliteConnection,
+    operation_id: CoordinationOperationId,
+    expected_version: u64,
+    expected_lease_epoch: u64,
+    now_ms: i64,
+    requested_lease_deadline_ms: i64,
+) -> Result<ClaimCoordinationCommandOutcome, CommandWriteError> {
+    ensure_active(connection).await?;
+    let stored =
+        load_command_by_operation(connection, operation_id, CommandPayloadAccess::MetadataOnly)
+            .await?
+            .ok_or(CommandWriteError::NotReady)?;
+    match stored.metadata.lifecycle {
+        CommandLifecycle::Succeeded | CommandLifecycle::Poisoned => {
+            return Ok(ClaimCoordinationCommandOutcome::Terminal(
+                stored.metadata.lifecycle,
+            ));
+        }
+        CommandLifecycle::Expired => return Ok(ClaimCoordinationCommandOutcome::Expired),
+        CommandLifecycle::Leased => return Ok(ClaimCoordinationCommandOutcome::NotReady),
+        CommandLifecycle::Pending => {}
+    }
+    if now_ms >= stored.metadata.expires_at_ms {
+        expire_one(connection, operation_id, now_ms).await?;
+        return Ok(ClaimCoordinationCommandOutcome::Expired);
+    }
+    if stored.metadata.version != expected_version
+        || stored.metadata.lease_epoch != expected_lease_epoch
+    {
+        return Ok(ClaimCoordinationCommandOutcome::Fenced);
+    }
+    if !target_is_current(connection, &stored.metadata).await? {
+        return Ok(ClaimCoordinationCommandOutcome::Fenced);
+    }
+    if now_ms < stored.metadata.retry_after_ms || requested_lease_deadline_ms <= now_ms {
+        return Ok(ClaimCoordinationCommandOutcome::NotReady);
+    }
+    let deadline = requested_lease_deadline_ms.min(stored.metadata.expires_at_ms);
+    let changed = sqlx::query(
+        "UPDATE coordination_commands SET lifecycle='leased',version=version+1,\
+         claim_count=claim_count+1,lease_epoch=lease_epoch+1,lease_expires_at_ms=?,\
+         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? AND lifecycle='pending' \
+         AND version=? AND lease_epoch=? AND retry_after_ms<=? AND expires_at_ms>? \
+         AND ciphertext IS NOT NULL",
+    )
+    .bind(deadline)
+    .bind(now_ms.max(0))
+    .bind(operation_id.to_string())
+    .bind(i64::try_from(expected_version).map_err(internal)?)
+    .bind(i64::try_from(expected_lease_epoch).map_err(internal)?)
+    .bind(now_ms)
+    .bind(now_ms)
+    .execute(&mut *connection)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if changed != 1 {
+        return Ok(ClaimCoordinationCommandOutcome::Fenced);
+    }
+    let stored = load_command_by_operation(connection, operation_id, CommandPayloadAccess::Claim)
+        .await?
+        .ok_or(CommandWriteError::CorruptStoredCommand)?;
+    let ciphertext = ciphertext(&stored)?;
+    let lease = CommandLeaseToken {
+        operation_id,
+        version: stored.metadata.version,
+        lease_epoch: stored.metadata.lease_epoch,
+        lease_expires_at_ms: deadline,
+    };
+    Ok(ClaimCoordinationCommandOutcome::Claimed(
+        ClaimedCoordinationCommand {
+            metadata: stored.metadata,
+            lease,
+            ciphertext,
+        },
+    ))
+}
+
+async fn begin_attempt(
+    connection: &mut SqliteConnection,
+    lease: CommandLeaseToken,
+    now_ms: i64,
+) -> Result<BegunCommandAttempt, CommandWriteError> {
+    ensure_active(connection).await?;
+    let stored = load_command_by_operation(
+        connection,
+        lease.operation_id,
+        CommandPayloadAccess::MetadataOnly,
+    )
+    .await?
+    .ok_or(CommandWriteError::NotReady)?;
+    if stored.metadata.lifecycle != CommandLifecycle::Leased
+        || stored.metadata.version != lease.version
+        || stored.metadata.lease_epoch != lease.lease_epoch
+        || lease.lease_expires_at_ms <= now_ms
+        || stored.metadata.expires_at_ms <= now_ms
+    {
+        return Err(CommandWriteError::LeaseFenced);
+    }
+    if !target_is_current(connection, &stored.metadata).await? {
+        return Err(CommandWriteError::GenerationFenced);
+    }
+    let changed = sqlx::query(
+        "UPDATE coordination_commands SET version=version+1,attempt_count=attempt_count+1,\
+         attempted_lease_epoch=lease_epoch,\
+         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? AND lifecycle='leased' \
+         AND version=? AND lease_epoch=? AND lease_expires_at_ms=? AND lease_expires_at_ms>? \
+         AND expires_at_ms>? AND (attempted_lease_epoch IS NULL OR attempted_lease_epoch<lease_epoch)",
+    )
+    .bind(now_ms.max(0))
+    .bind(lease.operation_id.to_string())
+    .bind(i64::try_from(lease.version).map_err(internal)?)
+    .bind(i64::try_from(lease.lease_epoch).map_err(internal)?)
+    .bind(lease.lease_expires_at_ms)
+    .bind(now_ms)
+    .bind(now_ms)
+    .execute(&mut *connection)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if changed != 1 {
+        return Err(CommandWriteError::LeaseFenced);
+    }
+    let stored = load_command_by_operation(
+        connection,
+        lease.operation_id,
+        CommandPayloadAccess::MetadataOnly,
+    )
+    .await?
+    .ok_or(CommandWriteError::CorruptStoredCommand)?;
+    Ok(BegunCommandAttempt {
+        lease: CommandLeaseToken {
+            version: stored.metadata.version,
+            ..lease
+        },
+        attempt: stored.metadata.attempt_count,
+    })
+}
+
+async fn resolve(
+    connection: &mut SqliteConnection,
+    attempt: BegunCommandAttempt,
+    resolution: CommandAttemptResolution,
+    now_ms: i64,
+) -> Result<ResolveCommandAttemptOutcome, CommandWriteError> {
+    ensure_active(connection).await?;
+    let lease = &attempt.lease;
+    let stored = load_command_by_operation(
+        connection,
+        lease.operation_id,
+        CommandPayloadAccess::MetadataOnly,
+    )
+    .await?
+    .ok_or(CommandWriteError::NotReady)?;
+    match stored.metadata.lifecycle {
+        CommandLifecycle::Succeeded | CommandLifecycle::Poisoned => {
+            return Ok(ResolveCommandAttemptOutcome::Terminal(
+                stored.metadata.lifecycle,
+            ));
+        }
+        CommandLifecycle::Expired => return Ok(ResolveCommandAttemptOutcome::Expired),
+        CommandLifecycle::Pending | CommandLifecycle::Leased => {}
+    }
+    if stored.metadata.lifecycle != CommandLifecycle::Leased
+        || stored.metadata.version != lease.version
+        || stored.metadata.lease_epoch != lease.lease_epoch
+        || stored.metadata.attempt_count != attempt.attempt
+        || stored.metadata.attempted_lease_epoch != Some(lease.lease_epoch)
+        || lease.lease_expires_at_ms <= now_ms
+        || stored.metadata.expires_at_ms <= now_ms
+    {
+        return Ok(ResolveCommandAttemptOutcome::Fenced);
+    }
+    let (lifecycle, retry_after, failure_code, terminal_at, expires_at) = match resolution {
+        CommandAttemptResolution::RetryAt { retry_at_ms, code } => {
+            if retry_at_ms <= now_ms || retry_at_ms >= stored.metadata.expires_at_ms {
+                return Err(CommandWriteError::NotReady);
+            }
+            (
+                "pending",
+                retry_at_ms,
+                Some(failure_code_sql(code)),
+                None,
+                stored.metadata.expires_at_ms,
+            )
+        }
+        CommandAttemptResolution::Succeeded => (
+            "succeeded",
+            stored.metadata.retry_after_ms,
+            None,
+            Some(now_ms.max(0)),
+            stored
+                .metadata
+                .expires_at_ms
+                .min(now_ms.saturating_add(TERMINAL_PAYLOAD_TTL_MS)),
+        ),
+        CommandAttemptResolution::Poisoned { code } => (
+            "poisoned",
+            stored.metadata.retry_after_ms,
+            Some(failure_code_sql(code)),
+            Some(now_ms.max(0)),
+            stored
+                .metadata
+                .expires_at_ms
+                .min(now_ms.saturating_add(TERMINAL_PAYLOAD_TTL_MS)),
+        ),
+    };
+    let changed = sqlx::query(
+        "UPDATE coordination_commands SET lifecycle=?,version=version+1,retry_after_ms=?,\
+         lease_expires_at_ms=NULL,failure_code=?,terminal_at_ms=?,expires_at_ms=?,\
+         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? AND lifecycle='leased' \
+         AND version=? AND lease_epoch=? AND lease_expires_at_ms=? AND lease_expires_at_ms>? \
+         AND expires_at_ms>?",
+    )
+    .bind(lifecycle)
+    .bind(retry_after)
+    .bind(failure_code)
+    .bind(terminal_at)
+    .bind(expires_at)
+    .bind(now_ms.max(0))
+    .bind(lease.operation_id.to_string())
+    .bind(i64::try_from(lease.version).map_err(internal)?)
+    .bind(i64::try_from(lease.lease_epoch).map_err(internal)?)
+    .bind(lease.lease_expires_at_ms)
+    .bind(now_ms)
+    .bind(now_ms)
+    .execute(&mut *connection)
+    .await
+    .map_err(internal)?
+    .rows_affected();
+    if changed != 1 {
+        return Ok(ResolveCommandAttemptOutcome::Fenced);
+    }
+    let metadata = load_command_by_operation(
+        connection,
+        lease.operation_id,
+        CommandPayloadAccess::MetadataOnly,
+    )
+    .await?
+    .ok_or(CommandWriteError::CorruptStoredCommand)?
+    .metadata;
+    Ok(ResolveCommandAttemptOutcome::Applied(metadata))
+}
+
+async fn reclaim(
+    connection: &mut SqliteConnection,
+    now_ms: i64,
+    limit: u32,
+) -> Result<u64, CommandWriteError> {
+    ensure_active(connection).await?;
+    sqlx::query(
+        "UPDATE coordination_commands SET lifecycle=CASE WHEN expires_at_ms<=? THEN 'expired' \
+         ELSE 'pending' END,version=version+1,lease_expires_at_ms=NULL,\
+         ciphertext=CASE WHEN expires_at_ms<=? THEN NULL ELSE ciphertext END,\
+         purged_at_ms=CASE WHEN expires_at_ms<=? THEN MAX(intent_at_ms,?) ELSE purged_at_ms END,\
+         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id IN (SELECT operation_id \
+         FROM coordination_commands WHERE lifecycle='leased' AND lease_expires_at_ms<=? \
+         ORDER BY lease_expires_at_ms,operation_id LIMIT ?)",
+    )
+    .bind(now_ms)
+    .bind(now_ms)
+    .bind(now_ms)
+    .bind(now_ms.max(0))
+    .bind(now_ms.max(0))
+    .bind(now_ms)
+    .bind(limit as i64)
+    .execute(&mut *connection)
+    .await
+    .map_err(internal)
+    .map(|result| result.rows_affected())
+}
+
+async fn expire(
+    connection: &mut SqliteConnection,
+    now_ms: i64,
+    limit: u32,
+) -> Result<u64, CommandWriteError> {
+    ensure_active(connection).await?;
+    sqlx::query(
+        "UPDATE coordination_commands SET lifecycle=CASE WHEN lifecycle IN ('succeeded','poisoned') \
+         THEN lifecycle ELSE 'expired' END,version=version+1,lease_expires_at_ms=NULL,\
+         ciphertext=NULL,purged_at_ms=MAX(intent_at_ms,?),updated_at_ms=MAX(updated_at_ms,?) \
+         WHERE operation_id IN (SELECT operation_id FROM coordination_commands \
+         WHERE ciphertext IS NOT NULL AND expires_at_ms<=? ORDER BY expires_at_ms,operation_id LIMIT ?)",
+    )
+    .bind(now_ms.max(0)).bind(now_ms.max(0)).bind(now_ms).bind(limit as i64)
+    .execute(&mut *connection).await.map_err(internal).map(|result| result.rows_affected())
+}
+
+async fn expire_one(
+    connection: &mut SqliteConnection,
+    operation_id: CoordinationOperationId,
+    now_ms: i64,
+) -> Result<(), CommandWriteError> {
+    sqlx::query(
+        "UPDATE coordination_commands SET lifecycle='expired',version=version+1,\
+         lease_expires_at_ms=NULL,ciphertext=NULL,purged_at_ms=MAX(intent_at_ms,?),\
+         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? \
+         AND lifecycle IN ('pending','leased') AND expires_at_ms<=?",
+    )
+    .bind(now_ms.max(0))
+    .bind(now_ms.max(0))
+    .bind(operation_id.to_string())
+    .bind(now_ms)
+    .execute(&mut *connection)
+    .await
+    .map_err(internal)?;
+    Ok(())
+}
+
+async fn begin(
+    runtime: &StateRuntime,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Sqlite>, CommandWriteError> {
+    let mut connection = runtime.pool.acquire().await.map_err(internal)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await
+        .map_err(internal)?;
+    Ok(connection)
+}
+
+async fn ensure_active(connection: &mut SqliteConnection) -> Result<(), CommandWriteError> {
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM coordination_authority WHERE singleton_id=1")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(internal)?;
+    if status != "active" {
+        return Err(CommandWriteError::Quarantined);
+    }
+    Ok(())
+}
+
+async fn finish<T>(
+    connection: &mut SqliteConnection,
+    result: Result<T, CommandWriteError>,
+) -> Result<T, CommandWriteError> {
+    match result {
+        Ok(value) => {
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(internal)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
+fn maintenance_limit(limit: u32) -> Result<(), CommandWriteError> {
+    if limit == 0 || limit > MAX_MAINTENANCE_BATCH {
+        return Err(CommandWriteError::NotReady);
+    }
+    Ok(())
+}
+
+fn internal(error: impl Into<anyhow::Error>) -> CommandWriteError {
+    CommandWriteError::Internal(error.into())
+}
