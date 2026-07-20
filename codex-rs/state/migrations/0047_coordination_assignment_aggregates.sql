@@ -357,7 +357,23 @@ BEGIN
             OR json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.targetTurnId') IS NOT t.target_turn_id
             OR json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.includedGenerations.items') IS NOT json(t.included_generations_json)
             OR json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.causes.omittedCount') IS NOT 0
-            OR json_array_length(CAST(NEW.canonical_event_bytes AS TEXT),'$.causes.items') IS NOT 0
+            OR json_array_length(CAST(NEW.canonical_event_bytes AS TEXT),'$.causes.items') IS NOT CASE
+                WHEN json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.kind')='turnInterrupted'
+                  AND json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.interruptionReason.reason')='requested'
+                THEN 1 ELSE 0 END
+            OR (json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.kind')='turnInterrupted'
+                AND json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.interruptionReason.reason')='requested'
+                AND NOT EXISTS (
+                    SELECT 1 FROM coordination_inbox i
+                    WHERE i.root_thread_id=t.root_thread_id
+                      AND i.recipient_thread_id=t.target_thread_id
+                      AND i.recipient_turn_id=t.target_turn_id
+                      AND i.operation_kind='interrupt'
+                      AND i.command_operation_id=json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.interruptionReason.operationId')
+                      AND i.receipt_event_id=json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.causes.items[0]')
+                      AND i.target_assignment_id=json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.target.assignment.assignmentId')
+                      AND i.target_generation=json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.target.assignment.generation')
+                ))
             OR json_extract(CAST(NEW.canonical_event_bytes AS TEXT),'$.includedGenerations.omittedCount') IS NOT 0
             OR NOT EXISTS (
                 SELECT 1 FROM json_each(CAST(NEW.canonical_event_bytes AS TEXT),'$.includedGenerations.items') target_generation
