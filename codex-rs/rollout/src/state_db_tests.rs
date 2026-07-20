@@ -108,6 +108,38 @@ async fn try_init_times_out_waiting_for_stuck_startup_backfill() -> anyhow::Resu
 }
 
 #[tokio::test]
+async fn fresh_after_corruption_bridge_returns_usable_quarantined_runtime() -> anyhow::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let state_path = codex_state::state_db_path(home.path());
+    tokio::fs::write(state_path.as_path(), b"corrupt primary").await?;
+    let fresh_start =
+        codex_state::backup_state_db_with_fresh_start_provenance(state_path.as_path()).await?;
+    let provenance = fresh_start
+        .provenance
+        .ok_or_else(|| anyhow::anyhow!("state backup should mint provenance"))?;
+
+    let runtime = try_init_with_roots_inner(
+        home.path().to_path_buf(),
+        home.path().to_path_buf(),
+        "test-provider".to_string(),
+        /*backfill_lease_seconds*/ None,
+        Some(provenance),
+    )
+    .await?;
+
+    assert!(matches!(
+        runtime.coordination_authority(),
+        codex_state::CoordinationAuthorityStatus::Quarantined { .. }
+    ));
+    assert_eq!(
+        runtime.get_backfill_state().await?.status,
+        codex_state::BackfillStatus::Complete
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconcile_rollout_preserves_existing_explicit_title() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
     let thread_id = ThreadId::new();

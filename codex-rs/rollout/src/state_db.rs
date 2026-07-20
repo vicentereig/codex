@@ -71,6 +71,22 @@ pub async fn try_init(config: &impl RolloutConfigView) -> anyhow::Result<StateDb
     .await
 }
 
+/// Initialize state after the caller durably backed up a corrupt state database.
+pub async fn try_init_fresh_after_corruption(
+    config: &impl RolloutConfigView,
+    provenance: codex_state::FreshAfterCorruption,
+) -> anyhow::Result<StateDbHandle> {
+    let config = RolloutConfig::from_view(config);
+    try_init_with_roots_inner(
+        config.codex_home,
+        config.sqlite_home,
+        config.model_provider_id,
+        /*backfill_lease_seconds*/ None,
+        Some(provenance),
+    )
+    .await
+}
+
 async fn try_init_with_roots(
     codex_home: PathBuf,
     sqlite_home: PathBuf,
@@ -81,6 +97,7 @@ async fn try_init_with_roots(
         sqlite_home,
         default_model_provider_id,
         /*backfill_lease_seconds*/ None,
+        /*fresh_after_corruption*/ None,
     )
     .await
 }
@@ -97,6 +114,7 @@ async fn try_init_with_roots_and_backfill_lease(
         sqlite_home,
         default_model_provider_id,
         Some(backfill_lease_seconds),
+        /*fresh_after_corruption*/ None,
     )
     .await
 }
@@ -106,16 +124,28 @@ async fn try_init_with_roots_inner(
     sqlite_home: PathBuf,
     default_model_provider_id: String,
     backfill_lease_seconds: Option<i64>,
+    fresh_after_corruption: Option<codex_state::FreshAfterCorruption>,
 ) -> anyhow::Result<StateDbHandle> {
-    let runtime =
-        codex_state::StateRuntime::init(sqlite_home.clone(), default_model_provider_id.clone())
+    let runtime = match fresh_after_corruption {
+        Some(provenance) => {
+            codex_state::StateRuntime::init_fresh_after_corruption(
+                sqlite_home.clone(),
+                default_model_provider_id.clone(),
+                provenance,
+            )
             .await
-            .with_context(|| {
-                format!(
-                    "failed to initialize state runtime at {}",
-                    sqlite_home.display()
-                )
-            })?;
+        }
+        None => {
+            codex_state::StateRuntime::init(sqlite_home.clone(), default_model_provider_id.clone())
+                .await
+        }
+    }
+    .with_context(|| {
+        format!(
+            "failed to initialize state runtime at {}",
+            sqlite_home.display()
+        )
+    })?;
     let backfill_gate_started = Instant::now();
     let backfill_gate_result = wait_for_backfill_gate(
         runtime.as_ref(),

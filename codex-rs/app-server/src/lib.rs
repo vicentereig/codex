@@ -1169,8 +1169,15 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
 ) -> anyhow::Result<StateDbInitResult> {
     let mut attempted_backups = HashSet::new();
     let mut recovered_databases = Vec::new();
+    let mut fresh_after_state_corruption = None;
     loop {
-        let err = match rollout_state_db::try_init(config).await {
+        let initialization = match fresh_after_state_corruption {
+            Some(provenance) => {
+                rollout_state_db::try_init_fresh_after_corruption(config, provenance).await
+            }
+            None => rollout_state_db::try_init(config).await,
+        };
+        let err = match initialization {
             Ok(state_db) => {
                 let recovery_notice = sqlite_recovery_notice(&recovered_databases);
                 if recovery_notice.is_some() {
@@ -1212,13 +1219,36 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
             "Codex local database at {} appears damaged. Moving it into a backup folder so the app server can rebuild it from saved data.",
             database_path.display()
         ));
-        let backups = codex_state::backup_runtime_db_for_fresh_start(database_path.as_path())
+        let state_database = codex_state::state_db_path(config.sqlite_home.as_path());
+        let (backups, recovered_provenance) = if database_path == state_database
+            && !sqlite_home_is_blocking_file(database_path.as_path())
+        {
+            let fresh_start = codex_state::backup_state_db_with_fresh_start_provenance(
+                database_path.as_path(),
+            )
             .await
             .map_err(|backup_err| {
                 anyhow::anyhow!(
                     "failed to move damaged sqlite state database files into a backup folder: {backup_err}; original error: {original_error}"
                 )
             })?;
+            (fresh_start.backups, fresh_start.provenance)
+        } else {
+            let backups = codex_state::backup_runtime_db_for_fresh_start(database_path.as_path())
+                .await
+                .map_err(|backup_err| {
+                    anyhow::anyhow!(
+                        "failed to move damaged sqlite state database files into a backup folder: {backup_err}; original error: {original_error}"
+                    )
+                })?;
+            (backups, None)
+        };
+        fresh_after_state_corruption = retain_state_corruption_provenance(
+            fresh_after_state_corruption,
+            database_path.as_path(),
+            state_database.as_path(),
+            recovered_provenance,
+        );
         for backup in &backups {
             emit_state_db_backup_warning(&format!(
                 "Moved damaged Codex local database file {} to {}",
@@ -1234,6 +1264,19 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
                 backup_folder: backup_folder.display().to_string(),
             });
         }
+    }
+}
+
+fn retain_state_corruption_provenance<T>(
+    current: Option<T>,
+    recovered_database: &Path,
+    state_database: &Path,
+    recovered: Option<T>,
+) -> Option<T> {
+    if recovered_database == state_database {
+        recovered.or(current)
+    } else {
+        current
     }
 }
 
@@ -1325,6 +1368,7 @@ mod tests {
     use super::LogFormat;
     #[cfg(debug_assertions)]
     use super::loader_overrides_with_test_user_config_file;
+    use super::retain_state_corruption_provenance;
     #[cfg(debug_assertions)]
     use codex_config::LoaderOverrides;
     #[cfg(debug_assertions)]
@@ -1347,6 +1391,29 @@ mod tests {
         assert_eq!(LogFormat::from_env_value(Some("")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("text")), LogFormat::Default);
         assert_eq!(LogFormat::from_env_value(Some("jsonl")), LogFormat::Default);
+    }
+
+    #[test]
+    fn state_corruption_provenance_is_primary_only_and_sticky() {
+        let state = std::path::Path::new("state_5.sqlite");
+        let logs = std::path::Path::new("logs_1.sqlite");
+
+        assert_eq!(
+            retain_state_corruption_provenance(None, logs, state, Some(1)),
+            None
+        );
+        assert_eq!(
+            retain_state_corruption_provenance(None, state, state, Some(1)),
+            Some(1)
+        );
+        assert_eq!(
+            retain_state_corruption_provenance(Some(1), logs, state, None),
+            Some(1)
+        );
+        assert_eq!(
+            retain_state_corruption_provenance(Some(1), state, state, None),
+            Some(1)
+        );
     }
 
     #[cfg(debug_assertions)]
