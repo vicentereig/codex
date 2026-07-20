@@ -7,9 +7,12 @@ use sqlx::Row;
 use super::aggregate_test_support::*;
 use super::commands::CommandWriteError;
 use super::commands_tests::assignment_command;
+use super::inbox_test_support::RECEIPT_ONE;
+use super::inbox_test_support::persist_initial_receipt;
 use crate::StateRuntime;
 use crate::model::coordination::CloseReservedAssignment;
 use crate::model::coordination_commands::*;
+use crate::model::coordination_inbox::CommittedReceiptAck;
 use crate::runtime::test_support::unique_temp_dir;
 
 pub(super) async fn pending_command()
@@ -22,6 +25,29 @@ pub(super) async fn pending_command()
         anyhow::bail!("unexpected duplicate");
     };
     Ok((runtime, metadata))
+}
+
+async fn committed_ack(runtime: &StateRuntime) -> anyhow::Result<CommittedReceiptAck> {
+    persist_initial_receipt(runtime).await?;
+    Ok(runtime
+        .coordination_durable_receipt_ack(codex_coordination::ReceiptId::parse(RECEIPT_ONE)?)
+        .await?)
+}
+
+fn uncommitted_ack() -> CommittedReceiptAck {
+    CommittedReceiptAck {
+        receipt_id: codex_coordination::ReceiptId::parse(RECEIPT_ONE).expect("receipt"),
+        command_operation_id: codex_coordination::CoordinationOperationId::parse(OPERATION)
+            .expect("operation"),
+        receipt_event_id: codex_coordination::CoordinationEventId::parse(
+            "019f7c6c-1111-7000-8000-000000000702",
+        )
+        .expect("event"),
+        delivery_fingerprint: [0; 32],
+        encoded_payload_bytes: 0,
+        durable_received_at_ms: 0,
+        expires_at_ms: 0,
+    }
 }
 
 #[tokio::test]
@@ -126,7 +152,8 @@ async fn claim_begin_reclaim_and_retry_use_independent_counters() -> anyhow::Res
 }
 
 #[tokio::test]
-async fn begun_attempt_survives_reopen_and_stale_resolve_is_epoch_fenced() -> anyhow::Result<()> {
+async fn begun_attempt_survives_reopen_and_recovery_poisons_unknown_delivery() -> anyhow::Result<()>
+{
     let state_dir = unique_temp_dir();
     let runtime = StateRuntime::init(state_dir.clone(), "test".to_string()).await?;
     let RecordCoordinationCommandOutcome::Applied(pending) = runtime
@@ -152,25 +179,32 @@ async fn begun_attempt_survives_reopen_and_stale_resolve_is_epoch_fenced() -> an
         runtime
             .reclaim_expired_coordination_command_leases(now + 100, 1)
             .await?,
-        1
+        0
     );
-    let ClaimCoordinationCommandOutcome::Claimed(reclaimed) = runtime
-        .claim_coordination_command(pending.operation_id, 3, 1, now + 100, now + 300)
-        .await?
-    else {
-        anyhow::bail!("reclaimed command was not claimed");
-    };
-    assert_eq!(reclaimed.metadata.attempt_count, 1);
+    let recovered =
+        super::recovery_batch::recover_coordination_batch(&runtime.pool, now + 100, 1).await?;
+    assert_eq!(
+        recovered.dispositions,
+        vec![super::recovery::RecoveryDisposition::CommandPoisoned]
+    );
     assert!(matches!(
         runtime
             .resolve_coordination_command_attempt(
                 stale_attempt,
-                CommandAttemptResolution::Succeeded,
+                CommandAttemptResolution::Succeeded {
+                    ack: uncommitted_ack(),
+                },
                 now + 101,
             )
             .await?,
-        ResolveCommandAttemptOutcome::Fenced
+        ResolveCommandAttemptOutcome::Terminal(CommandLifecycle::Poisoned)
     ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM coordination_degradation_records")
+            .fetch_one(&*runtime.pool)
+            .await?,
+        1
+    );
     Ok(())
 }
 
@@ -260,7 +294,9 @@ async fn success_is_first_wins_and_shortens_payload_ttl() -> anyhow::Result<()> 
                     lease: claimed.lease.clone(),
                     attempt: 0,
                 },
-                CommandAttemptResolution::Succeeded,
+                CommandAttemptResolution::Succeeded {
+                    ack: uncommitted_ack(),
+                },
                 now + 1,
             )
             .await?,
@@ -275,10 +311,11 @@ async fn success_is_first_wins_and_shortens_payload_ttl() -> anyhow::Result<()> 
             .await,
         Err(CommandWriteError::LeaseFenced)
     ));
+    let ack = committed_ack(&runtime).await?;
     let ResolveCommandAttemptOutcome::Applied(succeeded) = runtime
         .resolve_coordination_command_attempt(
             begun.clone(),
-            CommandAttemptResolution::Succeeded,
+            CommandAttemptResolution::Succeeded { ack: ack.clone() },
             now + 2,
         )
         .await?
@@ -290,14 +327,36 @@ async fn success_is_first_wins_and_shortens_payload_ttl() -> anyhow::Result<()> 
     assert!(matches!(
         runtime
             .resolve_coordination_command_attempt(
-                begun,
-                CommandAttemptResolution::Poisoned {
-                    code: CoordinationFailureCode::Internal,
-                },
+                begun.clone(),
+                CommandAttemptResolution::Succeeded { ack: ack.clone() },
                 now + 3,
             )
             .await?,
         ResolveCommandAttemptOutcome::Terminal(CommandLifecycle::Succeeded)
+    ));
+    let mut divergent_ack = ack;
+    divergent_ack.delivery_fingerprint[0] ^= 0xff;
+    assert!(matches!(
+        runtime
+            .resolve_coordination_command_attempt(
+                begun.clone(),
+                CommandAttemptResolution::Succeeded { ack: divergent_ack },
+                now + 4,
+            )
+            .await,
+        Err(CommandWriteError::IdempotencyConflict)
+    ));
+    assert!(matches!(
+        runtime
+            .resolve_coordination_command_attempt(
+                begun,
+                CommandAttemptResolution::Poisoned {
+                    code: CoordinationFailureCode::Internal,
+                },
+                now + 5,
+            )
+            .await,
+        Err(CommandWriteError::IdempotencyConflict)
     ));
     assert_eq!(
         runtime
@@ -363,7 +422,9 @@ async fn poison_is_first_wins_with_a_closed_failure_code() -> anyhow::Result<()>
         runtime
             .resolve_coordination_command_attempt(
                 begun,
-                CommandAttemptResolution::Succeeded,
+                CommandAttemptResolution::Succeeded {
+                    ack: uncommitted_ack(),
+                },
                 now + 3,
             )
             .await?,
@@ -415,8 +476,13 @@ async fn lease_is_clipped_and_terminal_ttl_never_extends_initial_seven_days() ->
     let begun = runtime
         .begin_coordination_command_attempt(claimed.lease, now + 1)
         .await?;
+    let ack = committed_ack(&runtime).await?;
     let ResolveCommandAttemptOutcome::Applied(succeeded) = runtime
-        .resolve_coordination_command_attempt(begun, CommandAttemptResolution::Succeeded, now + 2)
+        .resolve_coordination_command_attempt(
+            begun,
+            CommandAttemptResolution::Succeeded { ack },
+            now + 2,
+        )
         .await?
     else {
         anyhow::bail!("not succeeded");

@@ -95,7 +95,19 @@ async fn hard_expiry_clears_payload_and_quarantine_rejects_access() -> anyhow::R
         quarantined
             .resolve_coordination_command_attempt(
                 begun,
-                CommandAttemptResolution::Succeeded,
+                CommandAttemptResolution::Succeeded {
+                    ack: crate::model::coordination_inbox::CommittedReceiptAck {
+                        receipt_id: ReceiptId::parse("019f7c6c-1111-7000-8000-000000000201",)?,
+                        command_operation_id: metadata.operation_id,
+                        receipt_event_id: codex_coordination::CoordinationEventId::parse(
+                            "019f7c6c-1111-7000-8000-000000000702",
+                        )?,
+                        delivery_fingerprint: [0; 32],
+                        encoded_payload_bytes: 0,
+                        durable_received_at_ms: 0,
+                        expires_at_ms: 0,
+                    },
+                },
                 metadata.retry_after_ms + 2,
             )
             .await,

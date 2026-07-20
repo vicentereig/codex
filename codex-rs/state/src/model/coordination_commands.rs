@@ -11,7 +11,10 @@ use codex_coordination::CoordinationTarget;
 use codex_coordination::EncodedPayloadBytes;
 use codex_coordination::MAX_CIPHERTEXT_BYTES;
 use codex_coordination::MAX_ID_BYTES;
+use codex_coordination::ReceiptId;
 use codex_protocol::ThreadId;
+
+use super::coordination_inbox::CommittedReceiptAck;
 
 use super::coordination::NativeEventContext;
 use super::coordination::ReserveAssignment;
@@ -256,6 +259,8 @@ pub(crate) struct CoordinationCommandMetadata {
     pub lease_epoch: u64,
     pub retry_after_ms: i64,
     pub expires_at_ms: i64,
+    pub terminal_receipt_id: Option<ReceiptId>,
+    pub terminal_receipt_fingerprint: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -311,7 +316,9 @@ pub(crate) enum CommandAttemptResolution {
         retry_at_ms: i64,
         code: CoordinationFailureCode,
     },
-    Succeeded,
+    Succeeded {
+        ack: CommittedReceiptAck,
+    },
     Poisoned {
         code: CoordinationFailureCode,
     },

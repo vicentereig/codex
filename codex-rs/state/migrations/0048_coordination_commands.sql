@@ -88,6 +88,14 @@ CREATE TABLE coordination_commands (
         'payloadOverLimit','targetUnavailable','generationFenced','terminalConflict',
         'ownershipConflict','idempotencyConflict','retryExhausted','corruptEvidence','internal'
     )),
+    terminal_receipt_id TEXT CHECK (
+        terminal_receipt_id IS NULL OR length(terminal_receipt_id) = 36
+    ),
+    terminal_receipt_fingerprint BLOB CHECK (
+        terminal_receipt_fingerprint IS NULL
+        OR (typeof(terminal_receipt_fingerprint) = 'blob'
+            AND length(terminal_receipt_fingerprint) = 32)
+    ),
     intent_at_ms INTEGER NOT NULL CHECK (
         typeof(intent_at_ms) = 'integer' AND intent_at_ms BETWEEN 0 AND 9223372036854775807
     ),
@@ -118,6 +126,8 @@ CREATE TABLE coordination_commands (
         OR (lifecycle != 'leased' AND lease_expires_at_ms IS NULL)
     ),
     CHECK ((lifecycle IN ('succeeded','poisoned')) = (terminal_at_ms IS NOT NULL)),
+    CHECK ((lifecycle = 'succeeded') = (terminal_receipt_id IS NOT NULL)),
+    CHECK ((terminal_receipt_id IS NULL) = (terminal_receipt_fingerprint IS NULL)),
     CHECK (lifecycle != 'poisoned' OR failure_code IS NOT NULL),
     CHECK (lifecycle != 'expired' OR ciphertext IS NULL),
     CHECK (
@@ -228,6 +238,10 @@ WHEN NEW.operation_id != OLD.operation_id
   OR NEW.encoded_payload_bytes != OLD.encoded_payload_bytes
   OR NEW.ciphertext_fingerprint != OLD.ciphertext_fingerprint
   OR NEW.intent_at_ms != OLD.intent_at_ms
+  OR (OLD.terminal_receipt_id IS NOT NULL
+      AND NEW.terminal_receipt_id IS NOT OLD.terminal_receipt_id)
+  OR (OLD.terminal_receipt_fingerprint IS NOT NULL
+      AND NEW.terminal_receipt_fingerprint IS NOT OLD.terminal_receipt_fingerprint)
 BEGIN SELECT RAISE(ABORT, 'coordination command identity is immutable'); END;
 
 CREATE TRIGGER coordination_command_transition_guard
@@ -306,6 +320,13 @@ WHEN NEW.version != OLD.version + 1
           AND NEW.retry_after_ms = OLD.retry_after_ms
           AND ((NEW.lifecycle = 'succeeded' AND NEW.failure_code IS NULL)
               OR (NEW.lifecycle = 'poisoned' AND NEW.failure_code IS NOT NULL))
+          AND ((NEW.lifecycle = 'succeeded'
+                  AND OLD.terminal_receipt_id IS NULL
+                  AND NEW.terminal_receipt_id IS NOT NULL
+                  AND NEW.terminal_receipt_fingerprint IS NOT NULL)
+              OR (NEW.lifecycle = 'poisoned'
+                  AND NEW.terminal_receipt_id IS OLD.terminal_receipt_id
+                  AND NEW.terminal_receipt_fingerprint IS OLD.terminal_receipt_fingerprint))
           AND OLD.terminal_at_ms IS NULL AND NEW.terminal_at_ms IS NOT NULL
           AND NEW.terminal_at_ms = NEW.updated_at_ms
           AND NEW.updated_at_ms < OLD.expires_at_ms
@@ -315,6 +336,28 @@ WHEN NEW.version != OLD.version + 1
           )
           AND NEW.ciphertext IS OLD.ciphertext
           AND NEW.purged_at_ms IS OLD.purged_at_ms)
+      OR (OLD.lifecycle = 'leased' AND NEW.lifecycle = 'poisoned'
+          AND NEW.claim_count = OLD.claim_count
+          AND NEW.lease_epoch = OLD.lease_epoch
+          AND NEW.attempt_count = OLD.attempt_count
+          AND NEW.attempted_lease_epoch IS OLD.attempted_lease_epoch
+          AND OLD.attempted_lease_epoch = OLD.lease_epoch
+          AND NEW.retry_after_ms = OLD.retry_after_ms
+          AND NEW.failure_code IS NOT NULL
+          AND OLD.terminal_at_ms IS NULL
+          AND NEW.terminal_at_ms = NEW.updated_at_ms
+          AND OLD.lease_expires_at_ms <= NEW.updated_at_ms
+          AND NEW.expires_at_ms = MIN(
+              OLD.expires_at_ms, NEW.terminal_at_ms + 86400000
+          )
+          AND (
+              (NEW.updated_at_ms < OLD.expires_at_ms
+                  AND NEW.ciphertext IS OLD.ciphertext
+                  AND NEW.purged_at_ms IS OLD.purged_at_ms)
+              OR (NEW.updated_at_ms >= OLD.expires_at_ms
+                  AND NEW.ciphertext IS NULL
+                  AND NEW.purged_at_ms = NEW.updated_at_ms)
+          ))
       OR (OLD.lifecycle = 'leased' AND NEW.lifecycle = 'expired'
           AND NEW.claim_count = OLD.claim_count
           AND NEW.lease_epoch = OLD.lease_epoch
@@ -344,6 +387,8 @@ WHEN NEW.version != OLD.version + 1
           AND NEW.attempted_lease_epoch IS OLD.attempted_lease_epoch
           AND NEW.retry_after_ms = OLD.retry_after_ms
           AND NEW.failure_code IS OLD.failure_code
+          AND NEW.terminal_receipt_id IS OLD.terminal_receipt_id
+          AND NEW.terminal_receipt_fingerprint IS OLD.terminal_receipt_fingerprint
           AND NEW.terminal_at_ms IS OLD.terminal_at_ms
           AND NEW.expires_at_ms = OLD.expires_at_ms
           AND OLD.expires_at_ms <= NEW.updated_at_ms
@@ -364,6 +409,31 @@ WHEN NEW.version != OLD.version + 1
   ))
   OR (NEW.lifecycle = 'pending' AND NEW.claim_count != OLD.claim_count)
 BEGIN SELECT RAISE(ABORT, 'coordination command transition is invalid'); END;
+
+CREATE TRIGGER coordination_command_success_receipt_guard
+BEFORE UPDATE ON coordination_commands
+WHEN NEW.lifecycle = 'succeeded' AND NOT EXISTS (
+    SELECT 1 FROM coordination_inbox i
+    WHERE i.receipt_id = NEW.terminal_receipt_id
+      AND i.command_operation_id = NEW.operation_id
+      AND i.root_thread_id = NEW.root_thread_id
+      AND i.delivery_fingerprint = NEW.terminal_receipt_fingerprint
+)
+BEGIN SELECT RAISE(ABORT, 'coordination command success receipt is incoherent'); END;
+
+CREATE TRIGGER coordination_command_active_authority_insert
+BEFORE INSERT ON coordination_commands
+WHEN NOT EXISTS (
+    SELECT 1 FROM coordination_authority WHERE singleton_id=1 AND status='active'
+)
+BEGIN SELECT RAISE(ABORT, 'quarantined coordination authority is read-only'); END;
+
+CREATE TRIGGER coordination_command_active_authority_update
+BEFORE UPDATE ON coordination_commands
+WHEN NOT EXISTS (
+    SELECT 1 FROM coordination_authority WHERE singleton_id=1 AND status='active'
+)
+BEGIN SELECT RAISE(ABORT, 'quarantined coordination authority is read-only'); END;
 
 CREATE TRIGGER coordination_command_no_delete
 BEFORE DELETE ON coordination_commands

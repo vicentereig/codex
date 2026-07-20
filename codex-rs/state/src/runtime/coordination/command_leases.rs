@@ -230,7 +230,21 @@ async fn resolve(
     .await?
     .ok_or(CommandWriteError::NotReady)?;
     match stored.metadata.lifecycle {
-        CommandLifecycle::Succeeded | CommandLifecycle::Poisoned => {
+        CommandLifecycle::Succeeded => {
+            let CommandAttemptResolution::Succeeded { ack } = &resolution else {
+                return Err(CommandWriteError::IdempotencyConflict);
+            };
+            validate_success_ack(connection, lease.operation_id, ack).await?;
+            if stored.metadata.terminal_receipt_id != Some(ack.receipt_id)
+                || stored.metadata.terminal_receipt_fingerprint != Some(ack.delivery_fingerprint)
+            {
+                return Err(CommandWriteError::IdempotencyConflict);
+            }
+            return Ok(ResolveCommandAttemptOutcome::Terminal(
+                stored.metadata.lifecycle,
+            ));
+        }
+        CommandLifecycle::Poisoned => {
             return Ok(ResolveCommandAttemptOutcome::Terminal(
                 stored.metadata.lifecycle,
             ));
@@ -248,7 +262,15 @@ async fn resolve(
     {
         return Ok(ResolveCommandAttemptOutcome::Fenced);
     }
-    let (lifecycle, retry_after, failure_code, terminal_at, expires_at) = match resolution {
+    let (
+        lifecycle,
+        retry_after,
+        failure_code,
+        terminal_at,
+        expires_at,
+        terminal_receipt_id,
+        terminal_receipt_fingerprint,
+    ) = match resolution {
         CommandAttemptResolution::RetryAt { retry_at_ms, code } => {
             if retry_at_ms <= now_ms || retry_at_ms >= stored.metadata.expires_at_ms {
                 return Err(CommandWriteError::NotReady);
@@ -259,18 +281,25 @@ async fn resolve(
                 Some(failure_code_sql(code)),
                 None,
                 stored.metadata.expires_at_ms,
+                None,
+                None,
             )
         }
-        CommandAttemptResolution::Succeeded => (
-            "succeeded",
-            stored.metadata.retry_after_ms,
-            None,
-            Some(now_ms.max(0)),
-            stored
-                .metadata
-                .expires_at_ms
-                .min(now_ms.saturating_add(TERMINAL_PAYLOAD_TTL_MS)),
-        ),
+        CommandAttemptResolution::Succeeded { ack } => {
+            validate_success_ack(connection, lease.operation_id, &ack).await?;
+            (
+                "succeeded",
+                stored.metadata.retry_after_ms,
+                None,
+                Some(now_ms.max(0)),
+                stored
+                    .metadata
+                    .expires_at_ms
+                    .min(now_ms.saturating_add(TERMINAL_PAYLOAD_TTL_MS)),
+                Some(ack.receipt_id.to_string()),
+                Some(ack.delivery_fingerprint.to_vec()),
+            )
+        }
         CommandAttemptResolution::Poisoned { code } => (
             "poisoned",
             stored.metadata.retry_after_ms,
@@ -280,12 +309,14 @@ async fn resolve(
                 .metadata
                 .expires_at_ms
                 .min(now_ms.saturating_add(TERMINAL_PAYLOAD_TTL_MS)),
+            None,
+            None,
         ),
     };
     let changed = sqlx::query(
         "UPDATE coordination_commands SET lifecycle=?,version=version+1,retry_after_ms=?,\
          lease_expires_at_ms=NULL,failure_code=?,terminal_at_ms=?,expires_at_ms=?,\
-         updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? AND lifecycle='leased' \
+         terminal_receipt_id=?,terminal_receipt_fingerprint=?,updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id=? AND lifecycle='leased' \
          AND version=? AND lease_epoch=? AND lease_expires_at_ms=? AND lease_expires_at_ms>? \
          AND expires_at_ms>?",
     )
@@ -294,6 +325,8 @@ async fn resolve(
     .bind(failure_code)
     .bind(terminal_at)
     .bind(expires_at)
+    .bind(terminal_receipt_id)
+    .bind(terminal_receipt_fingerprint)
     .bind(now_ms.max(0))
     .bind(lease.operation_id.to_string())
     .bind(i64::try_from(lease.version).map_err(internal)?)
@@ -319,6 +352,38 @@ async fn resolve(
     Ok(ResolveCommandAttemptOutcome::Applied(metadata))
 }
 
+async fn validate_success_ack(
+    connection: &mut SqliteConnection,
+    operation_id: CoordinationOperationId,
+    ack: &crate::model::coordination_inbox::CommittedReceiptAck,
+) -> Result<(), CommandWriteError> {
+    if ack.command_operation_id != operation_id {
+        return Err(CommandWriteError::IdempotencyConflict);
+    }
+    let row: Option<(String, Vec<u8>, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT command_operation_id,delivery_fingerprint,receipt_event_id,encoded_payload_bytes,durable_received_at_ms,absolute_expires_at_ms FROM coordination_inbox WHERE receipt_id=?",
+    )
+    .bind(ack.receipt_id.to_string())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(internal)?;
+    let Some((stored_operation, fingerprint, receipt_event, encoded, received_at, expires_at)) =
+        row
+    else {
+        return Err(CommandWriteError::IdempotencyConflict);
+    };
+    if stored_operation != operation_id.to_string()
+        || fingerprint.as_slice() != ack.delivery_fingerprint
+        || receipt_event != ack.receipt_event_id.to_string()
+        || encoded != i64::from(ack.encoded_payload_bytes)
+        || received_at != ack.durable_received_at_ms
+        || expires_at != ack.expires_at_ms
+    {
+        return Err(CommandWriteError::IdempotencyConflict);
+    }
+    Ok(())
+}
+
 async fn reclaim(
     connection: &mut SqliteConnection,
     now_ms: i64,
@@ -332,6 +397,7 @@ async fn reclaim(
          purged_at_ms=CASE WHEN expires_at_ms<=? THEN MAX(intent_at_ms,?) ELSE purged_at_ms END,\
          updated_at_ms=MAX(updated_at_ms,?) WHERE operation_id IN (SELECT operation_id \
          FROM coordination_commands WHERE lifecycle='leased' AND lease_expires_at_ms<=? \
+         AND (attempted_lease_epoch IS NULL OR attempted_lease_epoch<lease_epoch) \
          ORDER BY lease_expires_at_ms,operation_id LIMIT ?)",
     )
     .bind(now_ms)

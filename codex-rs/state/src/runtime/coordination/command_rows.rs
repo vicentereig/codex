@@ -7,6 +7,7 @@ use codex_coordination::CoordinationFailureCode;
 use codex_coordination::CoordinationOperationId;
 use codex_coordination::IdempotencyKey;
 use codex_coordination::MAX_ID_BYTES;
+use codex_coordination::ReceiptId;
 use codex_protocol::ThreadId;
 use sha2::Digest;
 use sha2::Sha256;
@@ -53,7 +54,7 @@ pub(super) async fn load_command(
          captured_turn_set_bytes,captured_turn_set_fingerprint,idempotency_tuple_bytes,\
          idempotency_tuple_fingerprint,command_fingerprint,encoded_payload_bytes,NULL AS ciphertext,\
          ciphertext_fingerprint,lifecycle,version,claim_count,attempt_count,attempted_lease_epoch,lease_epoch,\
-         retry_after_ms,lease_expires_at_ms,expires_at_ms,e.canonical_event_bytes,\
+         retry_after_ms,lease_expires_at_ms,expires_at_ms,terminal_receipt_id,terminal_receipt_fingerprint,e.canonical_event_bytes,\
          e.event_fingerprint FROM coordination_commands c JOIN coordination_events e \
          ON e.event_id=c.intent_event_id WHERE c.root_thread_id=? \
          AND c.idempotency_tuple_fingerprint=?",
@@ -71,8 +72,8 @@ pub(super) async fn load_command_by_operation(
     operation_id: CoordinationOperationId,
     payload_access: CommandPayloadAccess,
 ) -> Result<Option<StoredCommand>, CommandWriteError> {
-    let metadata_sql = "SELECT operation_id,c.root_thread_id AS root_thread_id,intent_event_id,operation_kind,target_thread_id,target_assignment_id,target_generation,target_turn_id,captured_head_generation,captured_turn_set_bytes,captured_turn_set_fingerprint,idempotency_tuple_bytes,idempotency_tuple_fingerprint,command_fingerprint,encoded_payload_bytes,NULL AS ciphertext,ciphertext_fingerprint,lifecycle,version,claim_count,attempt_count,attempted_lease_epoch,lease_epoch,retry_after_ms,lease_expires_at_ms,expires_at_ms,e.canonical_event_bytes,e.event_fingerprint FROM coordination_commands c JOIN coordination_events e ON e.event_id=c.intent_event_id WHERE c.operation_id=?";
-    let claim_sql = "SELECT operation_id,c.root_thread_id AS root_thread_id,intent_event_id,operation_kind,target_thread_id,target_assignment_id,target_generation,target_turn_id,captured_head_generation,captured_turn_set_bytes,captured_turn_set_fingerprint,idempotency_tuple_bytes,idempotency_tuple_fingerprint,command_fingerprint,encoded_payload_bytes,ciphertext,ciphertext_fingerprint,lifecycle,version,claim_count,attempt_count,attempted_lease_epoch,lease_epoch,retry_after_ms,lease_expires_at_ms,expires_at_ms,e.canonical_event_bytes,e.event_fingerprint FROM coordination_commands c JOIN coordination_events e ON e.event_id=c.intent_event_id WHERE c.operation_id=?";
+    let metadata_sql = "SELECT operation_id,c.root_thread_id AS root_thread_id,intent_event_id,operation_kind,target_thread_id,target_assignment_id,target_generation,target_turn_id,captured_head_generation,captured_turn_set_bytes,captured_turn_set_fingerprint,idempotency_tuple_bytes,idempotency_tuple_fingerprint,command_fingerprint,encoded_payload_bytes,NULL AS ciphertext,ciphertext_fingerprint,lifecycle,version,claim_count,attempt_count,attempted_lease_epoch,lease_epoch,retry_after_ms,lease_expires_at_ms,expires_at_ms,terminal_receipt_id,terminal_receipt_fingerprint,e.canonical_event_bytes,e.event_fingerprint FROM coordination_commands c JOIN coordination_events e ON e.event_id=c.intent_event_id WHERE c.operation_id=?";
+    let claim_sql = "SELECT operation_id,c.root_thread_id AS root_thread_id,intent_event_id,operation_kind,target_thread_id,target_assignment_id,target_generation,target_turn_id,captured_head_generation,captured_turn_set_bytes,captured_turn_set_fingerprint,idempotency_tuple_bytes,idempotency_tuple_fingerprint,command_fingerprint,encoded_payload_bytes,ciphertext,ciphertext_fingerprint,lifecycle,version,claim_count,attempt_count,attempted_lease_epoch,lease_epoch,retry_after_ms,lease_expires_at_ms,expires_at_ms,terminal_receipt_id,terminal_receipt_fingerprint,e.canonical_event_bytes,e.event_fingerprint FROM coordination_commands c JOIN coordination_events e ON e.event_id=c.intent_event_id WHERE c.operation_id=?";
     let row = match payload_access {
         CommandPayloadAccess::MetadataOnly => {
             sqlx::query(metadata_sql)
@@ -154,6 +155,16 @@ fn stored_from_row(row: sqlx::sqlite::SqliteRow) -> Result<StoredCommand, Comman
         lease_epoch: unsigned(row.get("lease_epoch"))?,
         retry_after_ms: row.get("retry_after_ms"),
         expires_at_ms: row.get("expires_at_ms"),
+        terminal_receipt_id: row
+            .get::<Option<String>, _>("terminal_receipt_id")
+            .map(|value| ReceiptId::parse(&value))
+            .transpose()
+            .map_err(corrupt)?,
+        terminal_receipt_fingerprint: row
+            .get::<Option<Vec<u8>>, _>("terminal_receipt_fingerprint")
+            .map(std::convert::TryInto::try_into)
+            .transpose()
+            .map_err(|_| CommandWriteError::CorruptStoredCommand)?,
     };
     let tuple_bytes: Vec<u8> = row.get("idempotency_tuple_bytes");
     let tuple_fingerprint: Vec<u8> = row.get("idempotency_tuple_fingerprint");
