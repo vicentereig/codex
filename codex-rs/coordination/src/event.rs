@@ -14,6 +14,7 @@ use crate::CoordinationEventId;
 use crate::CoordinationOperationId;
 use crate::CoordinationRevision;
 use crate::CoordinationSchemaVersion;
+use crate::CoordinationSemanticSlot;
 use crate::EncodedPayloadBytes;
 use crate::Evidence;
 use crate::HandoffId;
@@ -355,6 +356,38 @@ pub enum CoordinationEventKind {
         content: ContentEvidence,
         reported_success: Evidence<bool>,
     },
+}
+
+impl CoordinationEventKind {
+    /// Returns the stable semantic identity slot used to derive native and
+    /// compatibility idempotency keys for this event kind.
+    pub fn semantic_slot(&self) -> CoordinationSemanticSlot {
+        use CoordinationEventKind as Kind;
+        use CoordinationSemanticSlot as Slot;
+        match self {
+            Kind::AssignmentRequested { .. } => Slot::AssignmentRequested,
+            Kind::AssignmentAccepted { .. } => Slot::AssignmentAccepted,
+            Kind::AssignmentGenerationClosed { .. } => Slot::AssignmentGenerationClosed,
+            Kind::MessageSubmissionRecorded { .. } => Slot::MessageSubmissionRecorded,
+            Kind::MessageDurablyReceived { .. } => Slot::MessageDurablyReceived,
+            Kind::MessageIncludedInModelInput { .. } => Slot::MessageIncludedInModelInput,
+            Kind::WaitStarted { .. } => Slot::WaitStarted,
+            Kind::WaitEnded { .. } => Slot::WaitEnded,
+            Kind::InterruptRequested { .. } => Slot::InterruptRequested,
+            Kind::InterruptDurablyReceived { .. } => Slot::InterruptDurablyReceived,
+            Kind::TurnInterrupted { .. } => Slot::TurnInterrupted,
+            Kind::Detached { .. } => Slot::Detached,
+            Kind::DependencyDeclared { .. } => Slot::DependencyDeclared,
+            Kind::OwnershipChanged { .. } => Slot::OwnershipChanged,
+            Kind::TurnCompleted { .. } => Slot::TurnCompleted,
+            Kind::TerminalResultObserved { .. } => Slot::TerminalResultObserved,
+            Kind::HandoffDeliveryAttempted { .. } => Slot::HandoffDeliveryAttempted,
+            Kind::HandoffDurablyReceived { .. } => Slot::HandoffDurablyReceived,
+            Kind::HandoffIncludedInModelInput { .. } => Slot::HandoffIncludedInModelInput,
+            Kind::HandoffDeliveryFailed { .. } => Slot::HandoffDeliveryFailed,
+            Kind::LegacyInteractionObserved { .. } => Slot::LegacyInteractionObserved,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

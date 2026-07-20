@@ -15,7 +15,6 @@ use crate::CoordinationEventEnvelope;
 use crate::CoordinationEventKind;
 use crate::CoordinationOrder;
 use crate::CoordinationPrincipal;
-use crate::CoordinationSemanticSlot;
 use crate::CoordinationSource;
 use crate::CoordinationTarget;
 use crate::EventData;
@@ -448,7 +447,7 @@ fn validate_compatibility_id(
         turn_id,
         item_id,
         key.source_ordinal.get(),
-        semantic_slot(kind),
+        kind.semantic_slot(),
     )?;
     if envelope.event_id != expected.event_id() {
         return Err(CoordinationError::Invariant(
@@ -456,32 +455,4 @@ fn validate_compatibility_id(
         ));
     }
     Ok(())
-}
-
-fn semantic_slot(kind: &CoordinationEventKind) -> CoordinationSemanticSlot {
-    use CoordinationEventKind as Kind;
-    use CoordinationSemanticSlot as Slot;
-    match kind {
-        Kind::AssignmentRequested { .. } => Slot::AssignmentRequested,
-        Kind::AssignmentAccepted { .. } => Slot::AssignmentAccepted,
-        Kind::AssignmentGenerationClosed { .. } => Slot::AssignmentGenerationClosed,
-        Kind::MessageSubmissionRecorded { .. } => Slot::MessageSubmissionRecorded,
-        Kind::MessageDurablyReceived { .. } => Slot::MessageDurablyReceived,
-        Kind::MessageIncludedInModelInput { .. } => Slot::MessageIncludedInModelInput,
-        Kind::WaitStarted { .. } => Slot::WaitStarted,
-        Kind::WaitEnded { .. } => Slot::WaitEnded,
-        Kind::InterruptRequested { .. } => Slot::InterruptRequested,
-        Kind::InterruptDurablyReceived { .. } => Slot::InterruptDurablyReceived,
-        Kind::TurnInterrupted { .. } => Slot::TurnInterrupted,
-        Kind::Detached { .. } => Slot::Detached,
-        Kind::DependencyDeclared { .. } => Slot::DependencyDeclared,
-        Kind::OwnershipChanged { .. } => Slot::OwnershipChanged,
-        Kind::TurnCompleted { .. } => Slot::TurnCompleted,
-        Kind::TerminalResultObserved { .. } => Slot::TerminalResultObserved,
-        Kind::HandoffDeliveryAttempted { .. } => Slot::HandoffDeliveryAttempted,
-        Kind::HandoffDurablyReceived { .. } => Slot::HandoffDurablyReceived,
-        Kind::HandoffIncludedInModelInput { .. } => Slot::HandoffIncludedInModelInput,
-        Kind::HandoffDeliveryFailed { .. } => Slot::HandoffDeliveryFailed,
-        Kind::LegacyInteractionObserved { .. } => Slot::LegacyInteractionObserved,
-    }
 }

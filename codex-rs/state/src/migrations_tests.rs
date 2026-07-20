@@ -553,3 +553,84 @@ INSERT OR REPLACE INTO coordination_events (
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn coordination_aggregate_schema_rejects_overflow_and_event_linkage_bypasses() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.clone());
+    let pool = sqlite
+        .open_read_write_pool(&state_db_path(&sqlite_home))
+        .await
+        .expect("sqlite database should open");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("all migrations should apply");
+
+    let epoch = "019f7c6c-1111-7000-8000-000000000801";
+    let root = "019f7c6c-1111-7000-8000-000000000601";
+    let assignment = "019f7c6c-1111-7000-8000-000000000301";
+    let child = "019f7c6c-1111-7000-8000-000000000603";
+    let operation = "019f7c6c-1111-7000-8000-000000000101";
+    let existing_event = "019f7c6c-1111-7000-8000-000000000701";
+    sqlx::query("INSERT INTO coordination_authority (state_epoch,status,created_at_ms,updated_at_ms) VALUES (?,'active',1,1)")
+        .bind(epoch).execute(&pool).await.expect("authority should insert");
+    sqlx::query("INSERT INTO coordination_roots (root_thread_id,state_epoch,committed_revision,published_revision,created_at_ms,updated_at_ms) VALUES (?,?,1,0,1,1)")
+        .bind(root).bind(epoch).execute(&pool).await.expect("root should insert");
+    sqlx::query("INSERT INTO coordination_assignment_heads (assignment_id,root_thread_id,child_thread_id,accepted_generation,next_generation,owner_thread_id,owner_turn_id,version,last_revision,created_at_ms,updated_at_ms) VALUES (?,?,?,NULL,2,?,'turn-a',0,1,1,1)")
+        .bind(assignment).bind(root).bind(child).bind(root).execute(&pool).await.expect("head should insert");
+
+    assert!(sqlx::query("INSERT INTO coordination_assignment_heads (assignment_id,root_thread_id,child_thread_id,accepted_generation,next_generation,owner_thread_id,owner_turn_id,version,last_revision,created_at_ms,updated_at_ms) VALUES ('019f7c6c-1111-7000-8000-000000000302',?,?,NULL,2147483648,?,'turn-a',0,1,1,1)")
+        .bind(root).bind(child).bind(root).execute(&pool).await.is_err());
+
+    sqlx::query("INSERT INTO coordination_events (event_id,root_thread_id,revision,canonical_event_bytes,event_fingerprint,idempotency_key_bytes,idempotency_key_fingerprint,occurred_at,created_at_ms) VALUES (?,?,1,?,zeroblob(32),?,zeroblob(32),1,1)")
+        .bind(existing_event).bind(root).bind(br#"{"kind":"assignmentRequested"}"#.as_slice()).bind(b"existing-event".as_slice())
+        .execute(&pool).await.expect("unlinked event should insert");
+    assert!(sqlx::query("INSERT INTO coordination_assignment_generations (assignment_id,generation,operation_id,mode,lifecycle,request_event_id,created_revision,last_revision,created_at_ms,updated_at_ms) VALUES (?,1,?,'spawn','reserved',?,1,1,1,1)")
+        .bind(assignment).bind(operation).bind(existing_event).execute(&pool).await.is_err());
+
+    let future_event = "019f7c6c-1111-7000-8000-000000000702";
+    let mut connection = pool.acquire().await.expect("connection should open");
+    sqlx::query("BEGIN")
+        .execute(&mut *connection)
+        .await
+        .expect("transaction should begin");
+    sqlx::query("INSERT INTO coordination_assignment_generations (assignment_id,generation,operation_id,mode,lifecycle,request_event_id,created_revision,last_revision,created_at_ms,updated_at_ms) VALUES (?,1,?,'spawn','reserved',?,2,2,1,1)")
+        .bind(assignment).bind(operation).bind(future_event).execute(&mut *connection).await.expect("future event link should insert");
+    let malformed = sqlx::query("INSERT INTO coordination_events (event_id,root_thread_id,revision,canonical_event_bytes,event_fingerprint,idempotency_key_bytes,idempotency_key_fingerprint,occurred_at,created_at_ms) VALUES (?,?,2,?,zeroblob(32),?,zeroblob(32),1,1)")
+        .bind(future_event).bind(root).bind(br#"{"kind":"assignmentRequested","operationId":"wrong"}"#.as_slice()).bind(b"malformed-event".as_slice())
+        .execute(&mut *connection).await;
+    assert!(malformed.is_err());
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .expect("transaction should roll back");
+    drop(connection);
+
+    assert!(
+        sqlx::query("INSERT INTO coordination_assignment_generations (assignment_id,generation,operation_id,mode,lifecycle,request_event_id,terminal_kind,created_revision,last_revision,created_at_ms,updated_at_ms) VALUES (?,1,?,'spawn','reserved',?,'completed',2,2,1,1)")
+            .bind(assignment)
+            .bind(operation)
+            .bind(future_event)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("INSERT INTO coordination_assignment_generations (assignment_id,generation,operation_id,mode,lifecycle,request_event_id,terminal_reason_json,created_revision,last_revision,created_at_ms,updated_at_ms) VALUES (?,1,?,'spawn','reserved',?,'{\"reason\":\"succeeded\"}',2,2,1,1)")
+            .bind(assignment)
+            .bind(operation)
+            .bind(future_event)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+
+    pool.close().await;
+}

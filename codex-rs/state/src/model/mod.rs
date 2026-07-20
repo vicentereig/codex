@@ -1,5 +1,6 @@
 mod agent_job;
 mod backfill_state;
+pub(crate) mod coordination;
 mod graph;
 mod log;
 mod memories;
