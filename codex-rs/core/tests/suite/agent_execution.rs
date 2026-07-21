@@ -125,7 +125,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     .await?;
     assert_eq!(
         second_output,
-        "collab spawn failed: agent thread limit reached"
+        "agent capacity is full (limit 1); a sub-agent cannot wait for a free slot, so no sub-agent was created"
     );
     assert_eq!(test.thread_manager.list_thread_ids().await.len(), 2);
 
