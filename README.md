@@ -1,19 +1,20 @@
 # Vicente's Codex
 
-Vicente's Codex is a Luna-aware fork for coordinating several agents with bounded results and explicit incomplete outcomes. It lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
+Vicente's Codex is a Luna-aware fork of Codex for running several agents at once. It bounds their concurrency, waits for them honestly, and never claims a result it cannot prove. `gpt-5.6-luna` runs as a `multi_agent_v2` root or child without touching the model catalog.
 
 ## What this fork covers
 
 ### Available now
 
-- **V2 by default** — new sessions use `multi_agent_v2`; configuration can opt out, and resumed sessions keep their recorded backend.
-- **Turn-scoped coordination** — targetable waits plus live join, cancellation, and detach semantics. Waits return bounded, deterministic terminal summaries for live descendants.
-- **Bounded durable recovery** — stable run identities, delivery receipts, fenced retries, turn- and lease-scoped cancellation, retention, and explicit partial or unknown outcomes. Recovery maintenance runs at turn completion; it is not an autonomous background scheduler and does not reattach every child after a process restart.
-- **Agent workspace** — `/agent` shows nested paths, lifecycle, plans, requested and effective model/effort, token usage, and estimated cost when available.
+- **V2 by default.** New sessions use `multi_agent_v2`. Configuration can opt out; resumed sessions keep the backend they started with.
+- **Turn-scoped coordination.** Targetable waits, live join, cancellation, and detach. A wait returns a bounded, deterministic summary of every live descendant — never a guess.
+- **Capacity-aware scheduling.** The concurrency cap bounds live runtime work, not agent history. A terminal child releases its slot the instant it finishes. A required spawn that arrives at a full cap queues instead of failing outright: it starts the moment a slot frees, exactly once, or reports a clear reason it could not — never a silent drop, never a false "started."
+- **Bounded durable recovery.** Stable run identities, delivery receipts, fenced retries, turn- and lease-scoped cancellation, retention, and explicit partial or unknown outcomes. Recovery runs at turn completion. It is not a background daemon, and it does not reattach every child after a restart.
+- **Agent workspace.** `/agent` shows nested paths, lifecycle, plans, requested and effective model/effort, token usage, and cost when available.
 
 ### Still evolving
 
-The TUI still has design work ahead for richer progress and telemetry views. Treat unavailable values and partial recovery as real states, not as evidence of success.
+The TUI needs more work on progress and telemetry views. Treat a missing value or a partial recovery as a real state, not as evidence of success.
 
 ## Use this fork
 
@@ -164,6 +165,44 @@ flowchart LR
 ```
 
 Keep work that blocks the next step with the root.
+
+## When the cap is full
+
+Set a small cap to see the scheduler work under pressure:
+
+```toml
+[features.multi_agent_v2]
+max_concurrent_threads_per_session = 4
+```
+
+Four threads means the root plus three children. Ask for four:
+
+```text
+Use Luna medium. Start three agents: audit the retry logic, profile the slow
+query, and draft release notes. As soon as any of them finishes, spawn a
+fourth agent to run the full test suite. Do not retry a failed spawn
+yourself — let the scheduler handle it.
+```
+
+The fourth `spawn_agent` call queues the instant it hits the cap; it neither
+fails nor blocks the other three. The moment one of them finishes, its slot
+releases, and the fourth spawn starts on its own — no retry from the model.
+If nothing frees a slot before the wait times out, Codex says so plainly: no
+sub-agent was created, and how long it waited. It never reports a spawn that
+did not happen.
+
+Interruptions get the same honesty. Ask for three required agents, then
+interrupt one:
+
+```text
+Use Luna medium. Delegate the migration to three required agents. If I
+interrupt one mid-task, report exactly which children finished and which
+did not — do not round up to "done."
+```
+
+An interrupted child settles as cancelled before the root reports anything.
+The root's summary lists precisely which required children are missing. It
+never claims three-for-three when the count is two.
 
 ## Choose a model and effort
 
