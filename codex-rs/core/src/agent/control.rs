@@ -51,6 +51,7 @@ use tracing::warn;
 
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
+pub(crate) use self::execution::ExecutionAdmission;
 pub(crate) use self::execution::ExecutionSlotTimeout;
 use self::residency::V2Residency;
 #[cfg(test)]

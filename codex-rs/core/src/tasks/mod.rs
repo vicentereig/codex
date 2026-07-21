@@ -23,6 +23,7 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+use crate::agent::control::ExecutionAdmission;
 use crate::agent::control::ExecutionSlotTimeout;
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::config::Config;
@@ -344,20 +345,40 @@ impl Session {
                     .default_wait_timeout_ms
                     .max(0) as u64,
             );
-        let agent_execution_guard = match self
-            .services
-            .agent_control
-            .acquire_execution_slot(
-                turn_context.multi_agent_version,
-                &turn_context.session_source,
-                wait_deadline,
-            )
-            .await
-        {
-            Ok(guard) => guard,
-            Err(ExecutionSlotTimeout) => {
-                self.abandon_turn_start_at_capacity(&turn_context).await;
-                return;
+        let agent_execution_guard = match self.services.agent_control.try_execution_guard(
+            turn_context.multi_agent_version,
+            &turn_context.session_source,
+        ) {
+            ExecutionAdmission::Unlimited => None,
+            ExecutionAdmission::Admitted(guard) => Some(guard),
+            ExecutionAdmission::AtCapacity => {
+                // Surface the wait: without this, a follow-up turn queued behind a full
+                // execution cap looks identical to plain Idle in the TUI, with no signal
+                // that anything is happening until it either starts or times out.
+                self.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: "turn start deferred: waiting for available agent capacity"
+                            .to_string(),
+                    }),
+                )
+                .await;
+                match self
+                    .services
+                    .agent_control
+                    .acquire_execution_slot(
+                        turn_context.multi_agent_version,
+                        &turn_context.session_source,
+                        wait_deadline,
+                    )
+                    .await
+                {
+                    Ok(guard) => guard,
+                    Err(ExecutionSlotTimeout) => {
+                        self.abandon_turn_start_at_capacity(&turn_context).await;
+                        return;
+                    }
+                }
             }
         };
 
