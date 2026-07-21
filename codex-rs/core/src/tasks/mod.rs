@@ -591,15 +591,17 @@ impl Session {
             aborted_turn = task.is_some();
             turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
             if let Some(task) = task {
+                // Cancel delegations before aborting the task itself so a spawn parked
+                // waiting for execution capacity observes cancellation before any spurious
+                // capacity wake-up during the grace below can let it bind and deliver.
+                // Mirrors `abort_turn_if_active`, which already orders it this way.
+                self.cancel_turn_delegations(task.turn_context.as_ref())
+                    .await;
                 self.handle_task_abort(task, reason.clone()).await;
             }
             if aborted_turn {
                 active_turn_to_clear = Some(active_turn);
             }
-        }
-
-        if let Some(turn_context) = turn_context.as_deref() {
-            self.cancel_turn_delegations(turn_context).await;
         }
 
         if let Some(turn_context) = turn_context.as_deref() {
