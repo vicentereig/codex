@@ -1,20 +1,27 @@
 # Vicente's Codex
 
-Vicente's Codex is a Luna-aware fork of Codex for running several agents at once. It bounds their concurrency, waits for them honestly, and never claims a result it cannot prove. `gpt-5.6-luna` runs as a `multi_agent_v2` root or child without touching the model catalog.
+Vicente's Codex is a Luna-aware fork for running several agents at once. It caps concurrent work, preserves incomplete states, and lets `gpt-5.6-luna` run as a `multi_agent_v2` root or child without changing the model catalog.
 
 ## What this fork covers
 
 ### Available now
 
 - **V2 by default.** New sessions use `multi_agent_v2`. Configuration can opt out; resumed sessions keep the backend they started with.
-- **Turn-scoped coordination.** Targetable waits, live join, cancellation, and detach. A wait returns a bounded, deterministic summary of every live descendant — never a guess.
-- **Capacity-aware scheduling.** The concurrency cap bounds live runtime work, not agent history. A terminal child releases its slot the instant it finishes. A required spawn that arrives at a full cap queues instead of failing outright: it starts the moment a slot frees, exactly once, or reports a clear reason it could not — never a silent drop, never a false "started."
-- **Bounded durable recovery.** Stable run identities, delivery receipts, fenced retries, turn- and lease-scoped cancellation, retention, and explicit partial or unknown outcomes. Recovery runs at turn completion. It is not a background daemon, and it does not reattach every child after a restart.
-- **Agent workspace.** `/agent` shows nested paths, lifecycle, plans, requested and effective model/effort, token usage, and cost when available.
+- **Turn-scoped coordination.** Targeted waits observe up to eight named agents and return sorted terminal changes. Untargeted waits wake on mailbox activity. Required, non-detached children remain joined at turn finalization.
+- **Capacity-aware scheduling.** The cap limits active V2 child turns, not agent history. A terminal child releases its permit. When the root spawns at capacity, the tool call waits for a permit within a fixed deadline; nested children fail fast to avoid self-deadlock.
+- **Durable delegation records.** Stable run identities, delivery receipts, fenced state transitions, scoped cancellation, and explicit unresolved or partial outcomes survive in SQLite. Reconciliation runs at turn completion, not in a background daemon, and a restart does not reattach every child.
+- **Agent workspace.** `/agent` shows nested paths, lifecycle, plans, requested and effective model/effort, token usage, and estimated cost when available.
+- **App-server runtime state.** V2 thread reads expose the effective model and effort plus durable, exact-turn plan snapshots. Unavailable values remain explicit.
 
 ### Still evolving
 
-The TUI needs more work on progress and telemetry views. Treat a missing value or a partial recovery as a real state, not as evidence of success.
+The TUI still needs richer progress and telemetry views.
+
+Durable retry and retention APIs are not yet a complete runtime recovery loop.
+
+The new coordination journal, command, inbox, and recovery state machines are internal groundwork. They do not yet provide a public coordination capability.
+
+Treat missing telemetry and unresolved recovery as real states, not as evidence of success.
 
 ## Use this fork
 
@@ -30,15 +37,16 @@ hash -r
 codex --version
 ```
 
-Start Codex with `gpt-5.6-luna`. These prompts exercise coordination, recovery,
-and deliberate swarm planning:
+Before opening a Luna session, set the non-reserved tool namespace in
+[Configure it](#configure-it). Then use prompts such as these to exercise
+coordination and deliberate swarm planning:
 
 ```text
 Use Luna medium. Split this change into research, edit, and review tasks. Keep required children joined before you finalize. Detach only work I mark as background.
 ```
 
 ```text
-Use Luna high. Delegate this migration with durable run identities. After an interruption or restart, report which children are recoverable, retry within bounded limits, and mark unknown or partial work instead of claiming success.
+Use Luna high. Delegate this migration with durable run identities. After an interruption or restart, report which durable records are resolved, unresolved, or partial. Do not infer that an unobserved child succeeded.
 ```
 
 ```text
@@ -49,7 +57,8 @@ For the product overview and official docs, see [OpenAI's Codex README](CODEX_RE
 
 ## Configure it
 
-`multi_agent_v2` is enabled by default. Add settings only to change its behavior:
+`multi_agent_v2` is enabled by default. Luna sessions must also use a
+non-reserved tool namespace:
 
 ```toml
 model = "gpt-5.6-luna"
@@ -63,23 +72,22 @@ tool_namespace = "agents"
 
 The thread cap includes the root agent, so `4` leaves three slots for children. `expose_spawn_agent_model_overrides` adds `model` and `reasoning_effort` to `spawn_agent`.
 
-`tool_namespace = "agents"` is required since 2026-07-19: the Responses API
-rejects client-declared tools in the reserved `collaboration` namespace for
-models outside the server-side multi-agent allowlist (Luna is not on it), failing every
-turn with `Invalid Value: 'tools'` before the prompt reaches the model — see
-[openai/codex#31864](https://github.com/openai/codex/issues/31864). Any
-non-reserved name works; existing sessions keep their recorded tool surface,
-so start a fresh session after setting it.
+The fork retains upstream's `collaboration` default, but the Responses API can
+reserve that namespace for a server-owned schema and reject a client-declared
+tool before the prompt reaches the model. The same collision is documented for
+Sol in [openai/codex#31864](https://github.com/openai/codex/issues/31864).
+`agents` avoids it for Luna. Existing sessions keep their recorded tool
+surface, so start a fresh session after changing the namespace.
 
 ### Select a backend or disable agents
 
 For new sessions, this fork selects V2 unless you explicitly opt out:
 
-| Configuration | New-session backend |
-| --- | --- |
-| Omit both settings, or enable `features.multi_agent_v2` | V2 |
-| `features.multi_agent_v2 = false` | V1 compatibility backend |
-| `features.multi_agent_v2 = false` and `agents.enabled = false` | Agents disabled |
+| Configuration                                                  | New-session backend      |
+| -------------------------------------------------------------- | ------------------------ |
+| Omit both settings, or enable `features.multi_agent_v2`        | V2                       |
+| `features.multi_agent_v2 = false`                              | V1 compatibility backend |
+| `features.multi_agent_v2 = false` and `agents.enabled = false` | Agents disabled          |
 
 `features.multi_agent_v2` is authoritative: `[agents] enabled = false` alone
 does not override V2. Either TOML form below opts a new session out of V2:
@@ -108,13 +116,15 @@ The root agent delegates independent, bounded tasks, continues local work, then 
 
 `fork_turns` controls conversation context, not file access:
 
-| Value | Child context | Use it when |
-| --- | --- | --- |
-| Omitted or `"all"` | Full forkable history | The task depends on decisions made across the conversation. |
-| A positive string such as `"3"` | The latest three turns | Recent context matters, but older discussion does not. |
-| `"none"` | No parent conversation | The task message stands alone. |
+| Value                           | Child context          | Use it when                                                 |
+| ------------------------------- | ---------------------- | ----------------------------------------------------------- |
+| Omitted or `"all"`              | Full forkable history  | The task depends on decisions made across the conversation. |
+| A positive string such as `"3"` | The latest three turns | Recent context matters, but older discussion does not.      |
+| `"none"`                        | No parent conversation | The task message stands alone.                              |
 
-Model and effort overrides work with all three forms. A full-history fork cannot override `agent_type`.
+Use model and effort overrides with `"none"` or a positive turn count. The
+shipped agent guidance keeps full-history forks on the parent model and effort.
+A full-history fork also cannot override `agent_type`.
 
 ## One delegation round
 
@@ -141,7 +151,7 @@ Suppose the root must change a configuration loader. It can assign three side ta
     "message": "Review the proposed loader change for compatibility and missing cases. Return findings only.",
     "model": "gpt-5.6-sol",
     "reasoning_effort": "xhigh",
-    "fork_turns": "all"
+    "fork_turns": "3"
   }
 ]
 ```
@@ -178,45 +188,35 @@ max_concurrent_threads_per_session = 4
 Four threads means the root plus three children. Ask for four:
 
 ```text
-Use Luna medium. Start three agents: audit the retry logic, profile the slow
-query, and draft release notes. As soon as any of them finishes, spawn a
-fourth agent to run the full test suite. Do not retry a failed spawn
-yourself — let the scheduler handle it.
+Use Luna medium. Start four agents now: audit the retry logic, profile the slow
+query, draft release notes, and run the focused test suite. Do not wait for one
+to finish before requesting the fourth.
 ```
 
-The fourth `spawn_agent` call queues the instant it hits the cap; it neither
-fails nor blocks the other three. The moment one of them finishes, its slot
-releases, and the fourth spawn starts on its own — no retry from the model.
-If nothing frees a slot before the wait times out, Codex says so plainly: no
-sub-agent was created, and how long it waited. It never reports a spawn that
-did not happen.
+The fourth root `spawn_agent` call waits inside the active tool call while the
+other children run. When a permit becomes available, it retries the
+transaction. If the deadline expires first, the tool says that no child was
+created and reports the wait budget. This is a bounded wait, not a durable
+background queue.
 
-Interruptions get the same honesty. Ask for three required agents, then
-interrupt one:
-
-```text
-Use Luna medium. Delegate the migration to three required agents. If I
-interrupt one mid-task, report exactly which children finished and which
-did not — do not round up to "done."
-```
-
-An interrupted child settles as cancelled before the root reports anything.
-The root's summary lists precisely which required children are missing. It
-never claims three-for-three when the count is two.
+When a parent turn is cancelled, Codex marks its pending delegation
+obligations before aborting the parent task. Turn finalization reports required
+children that settled as failed or cancelled. The `interrupt_agent` tool
+itself returns the target's previous status; settlement can follow later.
 
 ## Choose a model and effort
 
 Raise effort only when the task needs more reasoning. Luna supports `low` through `max`; Terra and Sol also support `ultra`. Defaults are `medium` for Luna and Terra and `low` for Sol.
 
-| Task | Model and effort | Example |
-| --- | --- | --- |
-| Fast fact or search | Luna `low` | Locate a config key and cite its tests. |
-| Small, bounded edit | Luna `medium` | Rename a known symbol and run one focused test. |
-| Routine repository work | Terra `medium` | Add validation in one crate with tests. |
-| Multi-file debugging | Terra `high` | Trace a setting from TOML through runtime state. |
-| Hard design or review | Sol `high` | Find compatibility risks in a protocol change. |
-| Architecture and synthesis | Sol `xhigh` | Split a cross-crate migration into safe stages. |
-| Parallel coordination | Sol `ultra` | Coordinate independent research, implementation, and review tracks. |
+| Task                       | Model and effort | Example                                                             |
+| -------------------------- | ---------------- | ------------------------------------------------------------------- |
+| Fast fact or search        | Luna `low`       | Locate a config key and cite its tests.                             |
+| Small, bounded edit        | Luna `medium`    | Rename a known symbol and run one focused test.                     |
+| Routine repository work    | Terra `medium`   | Add validation in one crate with tests.                             |
+| Multi-file debugging       | Terra `high`     | Trace a setting from TOML through runtime state.                    |
+| Hard design or review      | Sol `high`       | Find compatibility risks in a protocol change.                      |
+| Architecture and synthesis | Sol `xhigh`      | Split a cross-crate migration into safe stages.                     |
+| Parallel coordination      | Sol `ultra`      | Coordinate independent research, implementation, and review tracks. |
 
 Use `max` only when `xhigh` cannot resolve an ambiguous problem.
 
@@ -240,7 +240,7 @@ codex --version
 ```
 
 The path should be `~/.local/bin/codex`. Fork releases encode the upstream
-release, Vicente revision, and upstream base commit, for example:
+release, Vicente revision, and release seed commit, for example:
 
 ```text
 codex-cli 0.145.0-alpha.24-vicentes-version.0.9.0+openai.312caf176a
