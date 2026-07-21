@@ -106,7 +106,9 @@ async fn assert_compatibility_events(runtime: &StateRuntime) -> anyhow::Result<(
 
 async fn assert_roots_and_events(runtime: &StateRuntime) -> anyhow::Result<()> {
     let invalid_roots: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM coordination_roots r WHERE published_revision!=0 \
+        // Stage 3.1 lets native materialization advance `published_revision` up to
+        // `committed_revision`; only a watermark beyond the committed journal is corrupt.
+        "SELECT COUNT(*) FROM coordination_roots r WHERE published_revision>committed_revision \
          OR (SELECT COUNT(*) FROM coordination_events e \
              WHERE e.root_thread_id=r.root_thread_id)!=r.committed_revision \
          OR (r.committed_revision>0 AND (SELECT MIN(revision) FROM coordination_events e \

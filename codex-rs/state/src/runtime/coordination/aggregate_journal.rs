@@ -319,7 +319,7 @@ pub(super) async fn load_idempotent(
     if outbox.get::<String, _>("event_id") != event.envelope().event_id.to_string()
         || !matches!(
             outbox.get::<String, _>("status").as_str(),
-            "pending" | "leased" | "materialized"
+            "pending" | "leased" | "materialized" | "poisoned"
         )
     {
         return Err(CoordinationWriteError::CorruptStoredEvent);
@@ -361,7 +361,10 @@ pub(super) async fn load_event_id(
     injector
         .after_step(AggregateStep::AggregateRead)
         .map_err(internal)?;
-    if !matches!(outbox.as_str(), "pending" | "leased" | "materialized") {
+    if !matches!(
+        outbox.as_str(),
+        "pending" | "leased" | "materialized" | "poisoned"
+    ) {
         return Err(CoordinationWriteError::CorruptStoredEvent);
     }
     Ok(StoredEvent {

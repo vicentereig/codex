@@ -33,6 +33,7 @@ mod legacy_checkpoints;
 mod legacy_degradations;
 mod legacy_links;
 mod maintenance_degradation;
+mod projection_outbox;
 mod recovery;
 mod recovery_batch;
 mod recovery_guard;
@@ -123,6 +124,12 @@ mod failure_injection_integrity;
 #[path = "failure_injection_integrity_tests.rs"]
 mod failure_injection_integrity_tests;
 #[cfg(test)]
+#[path = "failure_injection_projection_outbox_matrix_support.rs"]
+mod failure_injection_projection_outbox_matrix_support;
+#[cfg(test)]
+#[path = "failure_injection_projection_outbox_matrix_tests.rs"]
+mod failure_injection_projection_outbox_matrix_tests;
+#[cfg(test)]
 #[path = "failure_injection_recovery_batch_matrix_tests.rs"]
 mod failure_injection_recovery_batch_matrix_tests;
 #[cfg(test)]
@@ -179,6 +186,9 @@ mod inclusion_retry_tests;
 #[cfg(test)]
 #[path = "inclusion_terminal_gate_tests.rs"]
 mod inclusion_terminal_gate_tests;
+#[cfg(test)]
+#[path = "projection_outbox_tests.rs"]
+mod projection_outbox_tests;
 #[cfg(test)]
 #[path = "recovery_adversarial_tests.rs"]
 mod recovery_adversarial_tests;

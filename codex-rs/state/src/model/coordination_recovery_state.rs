@@ -154,3 +154,100 @@ impl ResolveDegradationPublication {
         Ok(())
     }
 }
+
+/// Terminal or transient status of a native per-root projection publication.
+///
+/// Mirrors [`DegradationPublicationStatus`] for the native
+/// `coordination_projection_outbox` (the revision-anchored R+1 publication
+/// stream), including the `Poisoned` terminal added by migration 0052.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionPublicationStatus {
+    Pending,
+    Leased,
+    Materialized,
+    Poisoned,
+}
+
+/// A leased native projection publication: the outbox row for a root's next
+/// revision (`published_revision + 1`). Carries the CAS tokens (`version`,
+/// `lease_epoch`, `lease_expires_at_ms`) that fence stale resolutions.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct ProjectionPublicationLease {
+    pub event_id: CoordinationEventId,
+    pub root_thread_id: ThreadId,
+    pub revision: u64,
+    pub version: u64,
+    pub lease_epoch: u64,
+    pub lease_expires_at_ms: i64,
+}
+
+impl std::fmt::Debug for ProjectionPublicationLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectionPublicationLease")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimProjectionPublicationsOutcome {
+    Claimed(Vec<ProjectionPublicationLease>),
+    Deferred,
+}
+
+/// Request to claim a single root's next native revision (`published_revision + 1`)
+/// for publication. At most one row per root is ever eligible, because
+/// `(root_thread_id, revision)` is unique and only the immediate successor of the
+/// published watermark is claimable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimProjectionPublications {
+    pub root_thread_id: ThreadId,
+    pub expected_state_epoch: StateEpoch,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
+    pub limit: u32,
+}
+
+impl ClaimProjectionPublications {
+    pub(crate) fn validate(&self) -> Result<(), RecoveryInputError> {
+        if self.limit == 0 || self.limit > MAX_RECOVERY_BATCH {
+            return Err(RecoveryInputError::InvalidBatchLimit);
+        }
+        if self.now_ms < 0 || self.lease_expires_at_ms <= self.now_ms {
+            return Err(RecoveryInputError::InvalidLeaseDeadline);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProjectionPublicationResolution {
+    Materialized,
+    Retry { retry_after_ms: i64 },
+    Poisoned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolveProjectionPublicationOutcome {
+    Applied(ProjectionPublicationStatus),
+    Fenced,
+    Terminal(ProjectionPublicationStatus),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolveProjectionPublication {
+    pub lease: ProjectionPublicationLease,
+    pub expected_state_epoch: StateEpoch,
+    pub resolution: ProjectionPublicationResolution,
+    pub now_ms: i64,
+}
+
+impl ResolveProjectionPublication {
+    pub(crate) fn validate(&self) -> Result<(), RecoveryInputError> {
+        if self.now_ms < 0 {
+            return Err(RecoveryInputError::InvalidTimestamp);
+        }
+        Ok(())
+    }
+}
