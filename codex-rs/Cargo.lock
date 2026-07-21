@@ -3839,6 +3839,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "codex-coordination",
  "codex-extension-items",
  "codex-file-search",
  "codex-git-utils",
@@ -3850,7 +3851,9 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
+ "thiserror 2.0.18",
  "time",
  "tokio",
  "tracing",

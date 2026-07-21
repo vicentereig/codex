@@ -26,8 +26,28 @@ pub use model::Phase2JobClaimOutcome;
 pub use runtime::CoordinationAuthorityStatus;
 pub use runtime::FreshAfterCorruption;
 pub use runtime::RuntimeDbFreshStart;
+/// Crate-external facade for the Stage 3 coordination sidecar dispatcher
+/// (`codex-9u5.2.3.2`). Not a general-purpose API: it is deliberately narrow
+/// and exists only so `codex-rollout`'s sidecar writer/dispatcher can be
+/// test-driven against the native/degradation publication claim/ack state
+/// machines and the persisted per-root sidecar path. See
+/// `runtime/coordination/sidecar_api.rs` for the full contract.
+pub use runtime::SidecarClaimOutcome;
+pub use runtime::SidecarDegradationLease;
+pub use runtime::SidecarProjectionLease;
+pub use runtime::SidecarPublicationStatus;
+pub use runtime::SidecarResolution;
+pub use runtime::SidecarResolveOutcome;
+pub use runtime::SidecarStateError;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
+pub use runtime::active_state_epoch;
+pub use runtime::claim_degradation_publications;
+pub use runtime::claim_native_publications;
+pub use runtime::persist_root_sidecar_path;
+pub use runtime::resolve_degradation_publication;
+pub use runtime::resolve_native_publication;
+pub use runtime::root_sidecar_path;
 pub use sqlite::SqliteConfig;
 
 pub use audit::ThreadStateAuditRow;

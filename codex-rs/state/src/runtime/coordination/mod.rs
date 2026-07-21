@@ -38,6 +38,7 @@ mod recovery;
 mod recovery_batch;
 mod recovery_guard;
 mod reserve_transition;
+mod sidecar_api;
 mod terminal_facts;
 mod terminal_transition;
 mod wait_transitions;
@@ -47,6 +48,20 @@ pub(crate) use authority::initialize_authority;
 #[cfg(test)]
 pub(crate) use authority_marker::MARKER_FILE_NAME;
 pub(crate) use authority_marker::prepare_fresh_after_corruption_marker;
+pub use sidecar_api::SidecarClaimOutcome;
+pub use sidecar_api::SidecarDegradationLease;
+pub use sidecar_api::SidecarProjectionLease;
+pub use sidecar_api::SidecarPublicationStatus;
+pub use sidecar_api::SidecarResolution;
+pub use sidecar_api::SidecarResolveOutcome;
+pub use sidecar_api::SidecarStateError;
+pub use sidecar_api::active_state_epoch;
+pub use sidecar_api::claim_degradation_publications;
+pub use sidecar_api::claim_native_publications;
+pub use sidecar_api::persist_root_sidecar_path;
+pub use sidecar_api::resolve_degradation_publication;
+pub use sidecar_api::resolve_native_publication;
+pub use sidecar_api::root_sidecar_path;
 
 #[cfg(test)]
 #[path = "aggregate_concurrency_tests.rs"]

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+codex-coordination = { workspace = true }
 codex-extension-items = { workspace = true }
 codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
@@ -26,6 +27,7 @@ regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 time = { workspace = true, features = [
     "formatting",
     "local-offset",
@@ -47,3 +49,5 @@ zstd = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
