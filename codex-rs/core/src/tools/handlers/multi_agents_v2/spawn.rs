@@ -131,6 +131,9 @@ async fn handle_spawn_agent(
     // capacity from that turn can deadlock when it is the only worker, so only
     // the root may defer a spawn within the current tool call.
     let can_wait_for_capacity = !matches!(&turn.session_source, SessionSource::SubAgent(_));
+    // Records whether the root caller actually deferred at least once before the wait budget
+    // elapsed, so a capacity timeout can honestly say it waited rather than failed immediately.
+    let mut waited_for_capacity = false;
     let spawn_transaction = loop {
         let observed_capacity_epoch = session.services.agent_control.execution_capacity_epoch();
         match Box::pin(
@@ -158,10 +161,18 @@ async fn handle_spawn_agent(
                             .wait_for_execution_capacity_change(observed_capacity_epoch),
                     )
                     .await
-                    .is_ok() => {}
+                    .is_ok() =>
+            {
+                waited_for_capacity = true;
+            }
             Err(err) => {
                 turn.delegation_ledger.fail(delegation).await;
-                return Err(collab_spawn_error(err));
+                return Err(spawn_capacity_error(
+                    err,
+                    can_wait_for_capacity,
+                    waited_for_capacity,
+                    turn.config.multi_agent_v2.default_wait_timeout_ms.max(0) as u64,
+                ));
             }
         }
     };
@@ -342,6 +353,37 @@ async fn handle_spawn_agent(
     }
 }
 
+/// Build an honest failure for a spawn that could not obtain execution capacity.
+///
+/// The handler only reaches this path when the child was never created, so every message states
+/// plainly that no sub-agent exists rather than implying a partial start. `could_wait` is false for
+/// sub-agent callers that must fail fast to avoid self-deadlock; `waited` records whether the root
+/// caller actually deferred before the wait budget elapsed. Non-capacity errors keep the shared
+/// `collab_spawn_error` classification.
+fn spawn_capacity_error(
+    err: CodexErr,
+    could_wait: bool,
+    waited: bool,
+    wait_budget_ms: u64,
+) -> FunctionCallError {
+    match err {
+        CodexErr::AgentLimitReached { max_threads } if !could_wait => {
+            FunctionCallError::RespondToModel(format!(
+                "agent capacity is full (limit {max_threads}); a sub-agent cannot wait for a free slot, so no sub-agent was created"
+            ))
+        }
+        CodexErr::AgentLimitReached { max_threads } if waited => {
+            FunctionCallError::RespondToModel(format!(
+                "spawn_agent deferred waiting for available agent capacity (limit {max_threads}) and timed out after ~{wait_budget_ms}ms; no sub-agent was created"
+            ))
+        }
+        CodexErr::AgentLimitReached { max_threads } => FunctionCallError::RespondToModel(format!(
+            "agent capacity is full (limit {max_threads}); no sub-agent was created"
+        )),
+        err => collab_spawn_error(err),
+    }
+}
+
 impl CoreToolRuntime for Handler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
@@ -425,5 +467,66 @@ impl ToolOutput for SpawnAgentResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "spawn_agent")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(err: FunctionCallError) -> String {
+        match err {
+            FunctionCallError::RespondToModel(message) => message,
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_capacity_failure_reports_no_wait_and_no_child() {
+        let message = message(spawn_capacity_error(
+            CodexErr::AgentLimitReached { max_threads: 3 },
+            /*could_wait*/ false,
+            /*waited*/ false,
+            30_000,
+        ));
+        assert!(message.contains("limit 3"), "{message}");
+        assert!(message.contains("cannot wait"), "{message}");
+        assert!(message.contains("no sub-agent was created"), "{message}");
+    }
+
+    #[test]
+    fn root_capacity_timeout_reports_the_deferral() {
+        let message = message(spawn_capacity_error(
+            CodexErr::AgentLimitReached { max_threads: 2 },
+            /*could_wait*/ true,
+            /*waited*/ true,
+            30_000,
+        ));
+        assert!(message.contains("deferred"), "{message}");
+        assert!(message.contains("30000ms"), "{message}");
+        assert!(message.contains("no sub-agent was created"), "{message}");
+    }
+
+    #[test]
+    fn root_capacity_without_wait_budget_is_still_honest() {
+        let message = message(spawn_capacity_error(
+            CodexErr::AgentLimitReached { max_threads: 1 },
+            /*could_wait*/ true,
+            /*waited*/ false,
+            0,
+        ));
+        assert!(message.contains("capacity is full"), "{message}");
+        assert!(message.contains("no sub-agent was created"), "{message}");
+    }
+
+    #[test]
+    fn non_capacity_errors_fall_back_to_collab_spawn_error() {
+        let message = message(spawn_capacity_error(
+            CodexErr::UnsupportedOperation("boom".to_string()),
+            /*could_wait*/ true,
+            /*waited*/ true,
+            30_000,
+        ));
+        assert_eq!(message, "boom");
     }
 }

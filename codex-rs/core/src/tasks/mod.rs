@@ -23,6 +23,7 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+use crate::agent::control::ExecutionSlotTimeout;
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
@@ -329,6 +330,37 @@ impl Session {
         input: Vec<TurnInput>,
         task: T,
     ) {
+        // Acquire the execution permit before marking the turn started or taking
+        // the per-thread `active_turn` lock below. This is the authoritative cap
+        // gate: the admission is atomic (so it cannot overshoot `max_threads`),
+        // and the wait happens here — never while holding `active_turn` — so a
+        // queued subagent turn defers instead of starting over-cap. Root and V1
+        // turns are not execution-limited and return immediately with no permit.
+        let wait_deadline = tokio::time::Instant::now()
+            + Duration::from_millis(
+                turn_context
+                    .config
+                    .multi_agent_v2
+                    .default_wait_timeout_ms
+                    .max(0) as u64,
+            );
+        let agent_execution_guard = match self
+            .services
+            .agent_control
+            .acquire_execution_slot(
+                turn_context.multi_agent_version,
+                &turn_context.session_source,
+                wait_deadline,
+            )
+            .await
+        {
+            Ok(guard) => guard,
+            Err(ExecutionSlotTimeout) => {
+                self.abandon_turn_start_at_capacity(&turn_context).await;
+                return;
+            }
+        };
+
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
@@ -369,10 +401,6 @@ impl Session {
         let mut active = self.active_turn.lock().await;
         let turn = active.get_or_insert_with(ActiveTurn::default);
         debug_assert!(turn.task.is_none());
-        let agent_execution_guard = self.services.agent_control.execution_guard(
-            turn_context.multi_agent_version,
-            &turn_context.session_source,
-        );
         let done_clone = Arc::clone(&done);
         let session_ctx = Arc::new(SessionTaskContext::new(
             Arc::clone(self),
@@ -450,6 +478,65 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
+    }
+
+    /// Bail out of a turn start whose bounded wait for an execution permit
+    /// elapsed while the limiter was still at capacity.
+    ///
+    /// Starting the turn without a permit would exceed `max_threads`, so the
+    /// reserved (task-less) `active_turn` is released instead, other capacity
+    /// waiters are re-notified, an honest `TurnAborted` is emitted for the
+    /// sub-id, and any queued trigger-turn work is re-driven.
+    ///
+    /// This is a backstop for pathological saturation (the default wait is
+    /// 30s). The parent spawn handler remains the primary, earlier deferral
+    /// point for fresh spawns and additionally fails the durable delegation on
+    /// its own timeout; this backstop deliberately does not touch delegation
+    /// state. `Interrupted` is reused as the closest existing abort reason (no
+    /// new protocol variant); it also drives the same idle re-scheduling as a
+    /// normal interrupted turn.
+    async fn abandon_turn_start_at_capacity(self: &Arc<Self>, turn_context: &Arc<TurnContext>) {
+        let released = {
+            let mut active = self.active_turn.lock().await;
+            if active
+                .as_ref()
+                .is_some_and(|active_turn| active_turn.task.is_none())
+            {
+                *active = None;
+                true
+            } else {
+                false
+            }
+        };
+
+        warn!(
+            turn_id = %turn_context.sub_id,
+            "turn start deferred: execution capacity wait elapsed while at cap",
+        );
+
+        self.emit_turn_abort_lifecycle(
+            TurnAbortReason::Interrupted,
+            turn_context.extension_data.as_ref(),
+        )
+        .await;
+        self.send_event(
+            turn_context.as_ref(),
+            EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some(turn_context.sub_id.clone()),
+                reason: TurnAbortReason::Interrupted,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+        if released {
+            self.services
+                .agent_control
+                .notify_execution_capacity_changed();
+            self.maybe_start_turn_for_pending_work().await;
+        }
     }
 
     /// Starts a regular turn when the session is idle and pending work is waiting.

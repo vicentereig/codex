@@ -11,6 +11,22 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
+use tokio::time::Instant;
+
+/// Outcome of attempting to admit a turn start into the execution limiter.
+pub(crate) enum ExecutionAdmission {
+    /// The turn is not execution-limited (root or V1); no permit is required.
+    Unlimited,
+    /// A permit was acquired and must be held for the turn's lifetime.
+    Admitted(AgentExecutionGuard),
+    /// The limiter is at capacity; the caller must wait and retry.
+    AtCapacity,
+}
+
+/// Returned when a bounded wait for an execution permit elapses while the
+/// limiter is still at capacity.
+#[derive(Debug)]
+pub(crate) struct ExecutionSlotTimeout;
 
 #[derive(Default)]
 pub(super) struct AgentExecutionLimiter {
@@ -77,13 +93,82 @@ impl AgentControl {
         }
     }
 
+    /// Atomically admit a turn start.
+    ///
+    /// This is the single source of truth for the execution cap: the capacity
+    /// check and the permit acquisition happen as one atomic compare-exchange
+    /// inside [`AgentExecutionLimiter::try_guard`], so two concurrent turn
+    /// starts can never both observe a free slot and both take it.
+    pub(crate) fn try_execution_guard(
+        &self,
+        multi_agent_version: MultiAgentVersion,
+        session_source: &SessionSource,
+    ) -> ExecutionAdmission {
+        if !is_execution_limited(multi_agent_version, session_source) {
+            return ExecutionAdmission::Unlimited;
+        }
+        match Arc::clone(&self.agent_execution_limiter).try_guard() {
+            Some(guard) => ExecutionAdmission::Admitted(guard),
+            None => ExecutionAdmission::AtCapacity,
+        }
+    }
+
+    /// Acquire an execution permit for a turn start, waiting when the limiter
+    /// is at capacity.
+    ///
+    /// Returns:
+    /// - `Ok(None)` when the turn is not execution-limited (no permit needed);
+    /// - `Ok(Some(guard))` when a permit was acquired;
+    /// - `Err(ExecutionSlotTimeout)` when the bounded wait elapsed while still
+    ///   at capacity.
+    ///
+    /// The wait registers on the capacity `Notify` and re-runs the atomic
+    /// admission after each wake, epoch-guarded so a release that lands between
+    /// a failed admission and the registration is never missed. It holds no
+    /// lock, so a blocked turn start never stalls other work on the same
+    /// thread; a slot frees only when some other child's guard drops, which is
+    /// independent of this caller, so the wait cannot self-deadlock.
+    pub(crate) async fn acquire_execution_slot(
+        &self,
+        multi_agent_version: MultiAgentVersion,
+        session_source: &SessionSource,
+        deadline: Instant,
+    ) -> Result<Option<AgentExecutionGuard>, ExecutionSlotTimeout> {
+        loop {
+            let observed_epoch = self.execution_capacity_epoch();
+            match self.try_execution_guard(multi_agent_version, session_source) {
+                ExecutionAdmission::Unlimited => return Ok(None),
+                ExecutionAdmission::Admitted(guard) => return Ok(Some(guard)),
+                ExecutionAdmission::AtCapacity => {
+                    if tokio::time::timeout_at(
+                        deadline,
+                        self.wait_for_execution_capacity_change(observed_epoch),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return Err(ExecutionSlotTimeout);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn execution_guard(
         &self,
         multi_agent_version: MultiAgentVersion,
         session_source: &SessionSource,
     ) -> Option<AgentExecutionGuard> {
-        is_execution_limited(multi_agent_version, session_source)
-            .then(|| Arc::clone(&self.agent_execution_limiter).guard())
+        match self.try_execution_guard(multi_agent_version, session_source) {
+            ExecutionAdmission::Admitted(guard) => Some(guard),
+            ExecutionAdmission::Unlimited | ExecutionAdmission::AtCapacity => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_execution_count(&self) -> usize {
+        self.agent_execution_limiter.active.load(Ordering::Acquire)
     }
 
     /// Return the current capacity lifecycle epoch.
@@ -120,9 +205,30 @@ impl AgentExecutionLimiter {
         self.active.load(Ordering::Acquire) < self.max_threads()
     }
 
-    fn guard(self: Arc<Self>) -> AgentExecutionGuard {
-        self.active.fetch_add(1, Ordering::AcqRel);
-        AgentExecutionGuard { limiter: self }
+    /// Atomically acquire a permit if the limiter is below capacity.
+    ///
+    /// The capacity test and the increment are fused into a single
+    /// compare-exchange loop so the check-then-acquire can never be split by a
+    /// concurrent acquirer. Returns `None` when genuinely at capacity; the
+    /// `compare_exchange_weak` retry only re-runs on a spurious failure or a
+    /// racing acquirer, never overshooting `max_threads`.
+    fn try_guard(self: Arc<Self>) -> Option<AgentExecutionGuard> {
+        let max_threads = self.max_threads();
+        let mut current = self.active.load(Ordering::Acquire);
+        loop {
+            if current >= max_threads {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(AgentExecutionGuard { limiter: self }),
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn capacity_epoch(&self) -> u64 {
