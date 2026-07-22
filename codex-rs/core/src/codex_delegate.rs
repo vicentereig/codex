@@ -132,6 +132,7 @@ pub(crate) async fn run_codex_thread_interactive(
         attestation_provider: parent_session.services.attestation_provider.clone(),
         external_time_provider: Some(Arc::clone(&parent_session.services.time_provider)),
         inherited_multi_agent_version: Some(MultiAgentVersion::Disabled),
+        preallocated_identity: None,
     }))
     .or_cancel(&cancel_token)
     .await??;
@@ -165,6 +166,7 @@ pub(crate) async fn run_codex_thread_interactive(
         rx_event: rx_sub,
         agent_status: io.agent_status.clone(),
         session_loop_termination: io.session_loop_termination.clone(),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
     let io_for_events = Arc::clone(&io);
     tokio::spawn(async move {
@@ -270,6 +272,7 @@ pub(crate) async fn run_codex_thread_one_shot(
             tx_sub: tx_closed,
             agent_status,
             session_loop_termination,
+            preallocated_turn_id: std::sync::Mutex::new(None),
         },
     ))
 }

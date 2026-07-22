@@ -146,6 +146,7 @@ async fn spawn_v2_subagent(
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            /*preallocated_identity*/ None,
         )
         .await
         .expect("spawn v2 subagent")

@@ -25,7 +25,7 @@ fn durable_now_ms() -> i64 {
 /// submission and lifecycle logging cannot receive one without the other. Other spawn sources
 /// provide user input directly, making an uncontextualized inter-agent communication
 /// unrepresentable.
-enum SpawnInitialInput {
+pub(super) enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
     InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
 }
@@ -608,7 +608,7 @@ impl AgentControl {
         }
     }
 
-    async fn begin_agent_spawn_internal(
+    pub(super) async fn begin_agent_spawn_internal(
         &self,
         config: Config,
         initial_input: SpawnInitialInput,
@@ -749,6 +749,7 @@ impl AgentControl {
                     inheritance.environments,
                     inheritance.exec_policy,
                     options.environments.clone(),
+                    options.preallocated_identity.clone(),
                 ))
                 .await?
             }

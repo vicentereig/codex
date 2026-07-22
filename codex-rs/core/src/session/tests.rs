@@ -3793,6 +3793,7 @@ async fn set_rate_limits_retains_previous_credits() {
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
 
     let mut state = SessionState::new(session_configuration);
@@ -3902,6 +3903,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
 
     let mut state = SessionState::new(session_configuration);
@@ -4447,6 +4449,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     }
 }
 
@@ -5179,6 +5182,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
 
     let (tx_event, _rx_event) = async_channel::unbounded();
@@ -5310,6 +5314,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
     let per_turn_config =
         Session::build_per_turn_config(&session_configuration, session_configuration.cwd().clone());
@@ -5566,6 +5571,7 @@ async fn make_session_with_config_and_rx(
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
 
     let (tx_event, rx_event) = async_channel::unbounded();
@@ -5673,6 +5679,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         originator: "test_originator".to_string(),
         dynamic_tools: Vec::new(),
         user_shell_override: None,
+        preallocated_identity: None,
     };
 
     let (tx_event, rx_event) = async_channel::unbounded();
@@ -6416,6 +6423,7 @@ async fn submit_with_id_captures_current_span_trace_context() {
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: completed_session_loop_termination(),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
 
     let _trace_test_context = install_test_tracing("codex-core-tests");
@@ -6448,6 +6456,65 @@ async fn submit_with_id_captures_current_span_trace_context() {
 
     let submitted = rx_sub.recv().await.expect("submission");
     assert_eq!(submitted.trace, Some(expected_trace));
+}
+
+#[tokio::test]
+async fn submit_binds_preallocated_turn_id_exactly_once() {
+    // Stage 3 contract freeze, Decision 6: the first `submit` call on a session binds to a
+    // preallocated turn id instead of minting a fresh one; every call after that mints a fresh
+    // id as before.
+    let (tx_sub, rx_sub) = async_channel::bounded(4);
+    let (_tx_event, rx_event) = async_channel::unbounded();
+    let io = SessionIo {
+        tx_sub,
+        rx_event,
+        agent_status: watch::channel(AgentStatus::PendingInit).1,
+        session_loop_termination: completed_session_loop_termination(),
+        preallocated_turn_id: std::sync::Mutex::new(Some("preallocated-turn-1".to_string())),
+    };
+
+    let first_id = io
+        .submit(Op::Interrupt)
+        .await
+        .expect("first submit should succeed");
+    assert_eq!(first_id, "preallocated-turn-1");
+    let first_submitted = rx_sub.recv().await.expect("first submission");
+    assert_eq!(first_submitted.id, "preallocated-turn-1");
+
+    let second_id = io
+        .submit(Op::Interrupt)
+        .await
+        .expect("second submit should succeed");
+    assert_ne!(
+        second_id, "preallocated-turn-1",
+        "only the first submit call should consume the preallocated turn id"
+    );
+    let second_submitted = rx_sub.recv().await.expect("second submission");
+    assert_eq!(second_submitted.id, second_id);
+}
+
+#[tokio::test]
+async fn submit_mints_a_fresh_id_when_no_turn_id_was_preallocated() {
+    let (tx_sub, rx_sub) = async_channel::bounded(1);
+    let (_tx_event, rx_event) = async_channel::unbounded();
+    let io = SessionIo {
+        tx_sub,
+        rx_event,
+        agent_status: watch::channel(AgentStatus::PendingInit).1,
+        session_loop_termination: completed_session_loop_termination(),
+        preallocated_turn_id: std::sync::Mutex::new(None),
+    };
+
+    let id = io
+        .submit(Op::Interrupt)
+        .await
+        .expect("submit should succeed");
+    assert!(
+        uuid::Uuid::parse_str(&id).is_ok(),
+        "disabled-mode submit should mint a fresh uuid, exactly as before"
+    );
+    let submitted = rx_sub.recv().await.expect("submission");
+    assert_eq!(submitted.id, id);
 }
 
 #[tokio::test]
@@ -7180,6 +7247,7 @@ async fn shutdown_and_wait_allows_multiple_waiters() {
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     });
 
     let waiter_1 = {
@@ -7216,6 +7284,7 @@ async fn shutdown_and_wait_waits_when_shutdown_is_already_in_progress() {
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     });
 
     let waiter = {
@@ -7252,6 +7321,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
         rx_event: parent_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(parent_session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
 
     let (child_session, _child_turn_context) = make_session_and_context().await;
@@ -7274,6 +7344,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
     parent_session
         .guardian_review_session
@@ -7306,6 +7377,7 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
     parent_session
         .guardian_review_session
@@ -7337,6 +7409,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         rx_event: parent_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(parent_session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
 
     let (child_session, _child_turn_context) = make_session_and_context().await;
@@ -7359,6 +7432,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
         session_loop_termination: session_loop_termination_from_handle(child_session_loop_handle),
+        preallocated_turn_id: std::sync::Mutex::new(None),
     };
     parent_session
         .guardian_review_session
@@ -7469,6 +7543,7 @@ where
         originator: "test_originator".to_string(),
         dynamic_tools,
         user_shell_override: None,
+        preallocated_identity: None,
     };
     let per_turn_config =
         Session::build_per_turn_config(&session_configuration, session_configuration.cwd().clone());

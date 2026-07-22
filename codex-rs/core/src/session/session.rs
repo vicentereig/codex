@@ -105,6 +105,10 @@ pub(crate) struct SessionConfiguration {
     pub(super) originator: String,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) user_shell_override: Option<shell::Shell>,
+    /// Exact thread identity to bind at construction, when preallocated by an enabled
+    /// coordination spawn (Stage 3 contract freeze, Decision 6). `None` on every path today
+    /// except that gated spawn.
+    pub(super) preallocated_identity: Option<crate::coordination::PreallocatedThreadIdentity>,
 }
 
 impl SessionConfiguration {
@@ -536,7 +540,11 @@ impl Session {
 
         let thread_id = match &initial_history {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                ThreadId::default()
+                session_configuration
+                    .preallocated_identity
+                    .as_ref()
+                    .map(|preallocated| preallocated.thread_id)
+                    .unwrap_or_default()
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };

@@ -398,6 +398,10 @@ pub(crate) struct SessionIo {
     // Shared future for the background submission loop completion so multiple
     // callers can wait for shutdown.
     pub(crate) session_loop_termination: SessionLoopTermination,
+    /// Preallocated turn id (Decision 6) consumed by the first `submit` call on this session.
+    /// `None` on every production spawn path today; every call after the first (or every call at
+    /// all, when this was never set) mints a fresh id via `new_submission_id`.
+    pub(crate) preallocated_turn_id: std::sync::Mutex<Option<String>>,
 }
 
 pub(crate) type SessionLoopTermination = Shared<BoxFuture<'static, ()>>;
@@ -442,6 +446,9 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) external_time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) inherited_multi_agent_version: Option<MultiAgentVersion>,
+    /// Exact thread/turn identity to bind instead of minting fresh ones (Stage 3 contract
+    /// freeze, Decision 6). `None` on every production spawn path today.
+    pub(crate) preallocated_identity: Option<crate::coordination::PreallocatedThreadIdentity>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -531,6 +538,7 @@ impl Session {
             attestation_provider,
             external_time_provider,
             inherited_multi_agent_version,
+            preallocated_identity,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -670,6 +678,7 @@ impl Session {
             originator,
             dynamic_tools,
             user_shell_override,
+            preallocated_identity: preallocated_identity.clone(),
         };
 
         // Generate a unique ID for the lifetime of this session.
@@ -732,6 +741,9 @@ impl Session {
             rx_event,
             agent_status: agent_status_rx,
             session_loop_termination: session_loop_termination_from_handle(session_loop_handle),
+            preallocated_turn_id: std::sync::Mutex::new(
+                preallocated_identity.map(|identity| identity.turn_id),
+            ),
         };
 
         Ok((session, io))
@@ -749,7 +761,9 @@ impl SessionIo {
         op: Op,
         trace: Option<W3cTraceContext>,
     ) -> CodexResult<String> {
-        let id = new_submission_id();
+        let id = self
+            .take_preallocated_turn_id()
+            .unwrap_or_else(new_submission_id);
         let sub = Submission {
             id: id.clone(),
             op,
@@ -758,6 +772,15 @@ impl SessionIo {
         };
         self.submit_with_id(sub).await?;
         Ok(id)
+    }
+
+    /// Consume the preallocated turn id (Decision 6), if one was set and has not already been
+    /// used by an earlier `submit` call on this session.
+    fn take_preallocated_turn_id(&self) -> Option<String> {
+        self.preallocated_turn_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     pub(crate) async fn submit_user_input_with_client_user_message_id(

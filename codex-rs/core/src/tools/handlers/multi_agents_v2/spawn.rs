@@ -122,6 +122,7 @@ async fn handle_spawn_agent(
         delegation_id: Some(delegation_id),
         run_id: Some(run_id),
         state_db: session.services.state_db.clone(),
+        preallocated_identity: None,
     };
     let retry_deadline = Instant::now()
         + std::time::Duration::from_millis(

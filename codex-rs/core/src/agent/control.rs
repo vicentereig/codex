@@ -57,6 +57,7 @@ use self::residency::V2Residency;
 #[cfg(test)]
 pub(crate) use self::spawn::SpawnAgentTransaction as SpawnTransaction;
 
+mod coordination_spawn;
 mod execution;
 mod legacy;
 mod residency;
@@ -81,6 +82,10 @@ pub(crate) struct SpawnAgentOptions {
     /// Stable run identity for retries and reconciliation.
     pub(crate) run_id: Option<String>,
     pub(crate) state_db: Option<crate::StateDbHandle>,
+    /// Exact thread/turn identity to bind instead of minting fresh ones (Stage 3 contract
+    /// freeze, Decision 6). A generic capability: behaves identically whether or not
+    /// coordination is enabled. `None` on every production spawn path today.
+    pub(crate) preallocated_identity: Option<crate::coordination::PreallocatedThreadIdentity>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +121,9 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    /// Capability-off coordination control surface (Stage 3 contract freeze). Unconditionally
+    /// `Disabled` in production; see `crate::coordination::CoordinationControl`.
+    coordination: crate::coordination::CoordinationControl,
 }
 
 impl AgentControl {
@@ -142,6 +150,18 @@ impl AgentControl {
 
     pub(crate) fn session_id(&self) -> SessionId {
         self.session_id
+    }
+
+    /// Enable the coordination control surface. Test-only: no production code path can call
+    /// this, so `coordination` remains unconditionally `Disabled` outside tests.
+    #[cfg(test)]
+    pub(crate) fn with_coordination_enabled_for_tests(
+        mut self,
+        coordination: Arc<crate::coordination::CoordinationState>,
+    ) -> Self {
+        self.coordination =
+            crate::coordination::CoordinationControl::enabled_for_tests(coordination);
+        self
     }
 
     pub(crate) fn rollout_budget(&self) -> &RolloutBudget {

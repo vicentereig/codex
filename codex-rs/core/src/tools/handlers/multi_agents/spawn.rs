@@ -132,6 +132,7 @@ async fn handle_spawn_agent(
             delegation_id: None,
             run_id: None,
             state_db: None,
+            preallocated_identity: None,
         },
     ))
     .await

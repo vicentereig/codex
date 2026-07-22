@@ -3914,3 +3914,354 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
 }
+
+// Stage 3 contract freeze, Decision 5/6: `CoordinationControl::Enabled` gated spawn tests.
+//
+// `AgentControl::with_coordination_enabled_for_tests` and `CoordinationState::new_for_tests` are
+// both `#[cfg(test)]`-only; there is no production caller that can reach the paths these tests
+// exercise. Disabled mode (every other test in this file) is completely untouched by their
+// existence.
+mod coordination_gated_spawn {
+    use super::*;
+    use crate::coordination::CoordinationState;
+    use crate::coordination::OperationIdentityKey;
+    use crate::coordination::SemanticSlot;
+    use crate::coordination::SpawnFailureInjector;
+    use crate::coordination::SpawnFailurePoint;
+    use pretty_assertions::assert_eq;
+
+    fn coordination_key(root: ThreadId, call_id: &str) -> OperationIdentityKey {
+        OperationIdentityKey {
+            root_thread_id: root,
+            actor_thread_id: root,
+            actor_turn_id: "actor-turn-1".to_string(),
+            call_id: call_id.to_string(),
+            semantic_slot: SemanticSlot::Spawn,
+        }
+    }
+
+    /// A real `SessionSource::SubAgent(ThreadSpawn)` under `parent_thread_id`. Preallocation
+    /// (Decision 6) is only wired through `begin_agent_spawn_internal`'s
+    /// `state.spawn_new_thread_with_source(...)` seam, which is reached only when a session
+    /// source is present (see `agent/control/spawn.rs::begin_agent_spawn_internal`'s match on
+    /// `(session_source, fork_mode, inheritance)`); a `None` session source instead takes the
+    /// simpler `state.spawn_new_thread(...)` root-spawn path, which never accepts a preallocated
+    /// identity. Every real spawn call site always supplies a session source, so tests that
+    /// exercise an actual child creation must too.
+    fn thread_spawn_source(parent_thread_id: ThreadId) -> SessionSource {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        })
+    }
+
+    async fn healthy_coordination_state(harness: &AgentControlHarness) -> Arc<CoordinationState> {
+        let state_db = harness
+            .state_db
+            .clone()
+            .expect("state db should initialize for a fresh test codex_home");
+        CoordinationState::new_for_tests(Some(state_db))
+    }
+
+    #[tokio::test]
+    async fn disabled_control_fails_before_any_side_effect() {
+        let harness = AgentControlHarness::new().await;
+        let root = ThreadId::new();
+        let err = harness
+            .control
+            .spawn_agent_coordinated(
+                coordination_key(root, "call-1"),
+                harness.config.clone(),
+                text_input("spawned"),
+                /*session_source*/ None,
+                SpawnAgentOptions::default(),
+            )
+            .await
+            .expect_err("disabled coordination must fail before any side effect");
+        assert!(err.to_string().contains("coordination is disabled"));
+    }
+
+    #[tokio::test]
+    async fn enabled_with_state_absent_fails_before_any_side_effect() {
+        let harness = AgentControlHarness::new().await;
+        let coordination = CoordinationState::new_for_tests(/* state_db */ None);
+        let control = harness
+            .control
+            .clone()
+            .with_coordination_enabled_for_tests(coordination);
+        let root = ThreadId::new();
+
+        let err = control
+            .spawn_agent_coordinated(
+                coordination_key(root, "call-1"),
+                harness.config.clone(),
+                text_input("spawned"),
+                /*session_source*/ None,
+                SpawnAgentOptions::default(),
+            )
+            .await
+            .expect_err("absent coordination state must fail before any side effect");
+        assert!(err.to_string().contains("state is absent"));
+    }
+
+    #[tokio::test]
+    async fn enabled_with_root_poisoned_fails_before_any_side_effect() {
+        let harness = AgentControlHarness::new().await;
+        let coordination = healthy_coordination_state(&harness).await;
+        let root = ThreadId::new();
+        coordination.mark_root_poisoned_for_tests(root);
+        let control = harness
+            .control
+            .clone()
+            .with_coordination_enabled_for_tests(coordination);
+
+        let err = control
+            .spawn_agent_coordinated(
+                coordination_key(root, "call-1"),
+                harness.config.clone(),
+                text_input("spawned"),
+                /*session_source*/ None,
+                SpawnAgentOptions::default(),
+            )
+            .await
+            .expect_err("poisoned root must fail before any side effect");
+        assert!(err.to_string().contains("poisoned"));
+    }
+
+    #[tokio::test]
+    async fn enabled_spawn_binds_the_exact_preallocated_thread_and_delivers_once() {
+        let harness = AgentControlHarness::new().await;
+        let coordination = healthy_coordination_state(&harness).await;
+        let control = harness
+            .control
+            .clone()
+            .with_coordination_enabled_for_tests(coordination);
+        let (root, _parent_thread) = harness.start_thread().await;
+
+        let live_agent = control
+            .spawn_agent_coordinated(
+                coordination_key(root, "call-1"),
+                harness.config.clone(),
+                text_input("spawned"),
+                Some(thread_spawn_source(root)),
+                SpawnAgentOptions {
+                    parent_thread_id: Some(root),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("enabled coordinated spawn should succeed");
+
+        harness
+            .manager
+            .get_thread(live_agent.thread_id)
+            .await
+            .expect("preallocated child thread should be registered");
+        let delivered = harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, _)| *thread_id == live_agent.thread_id)
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "the initial prompt must be delivered exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_spawn_attempt_reuses_thread_and_never_creates_a_second_child() {
+        let harness = AgentControlHarness::new().await;
+        let coordination = healthy_coordination_state(&harness).await;
+        let control = harness
+            .control
+            .clone()
+            .with_coordination_enabled_for_tests(coordination);
+        let (root, _parent_thread) = harness.start_thread().await;
+        let key = coordination_key(root, "call-1");
+        let options = || SpawnAgentOptions {
+            parent_thread_id: Some(root),
+            ..Default::default()
+        };
+
+        let first = control
+            .spawn_agent_coordinated(
+                key.clone(),
+                harness.config.clone(),
+                text_input("spawned"),
+                Some(thread_spawn_source(root)),
+                options(),
+            )
+            .await
+            .expect("first coordinated spawn should succeed");
+        let second = control
+            .spawn_agent_coordinated(
+                key,
+                harness.config.clone(),
+                text_input("spawned-again"),
+                Some(thread_spawn_source(root)),
+                options(),
+            )
+            .await
+            .expect("duplicate coordinated spawn should reuse the same child");
+
+        assert_eq!(first.thread_id, second.thread_id);
+        let delivered = harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, _)| *thread_id == first.thread_id)
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "a duplicate spawn attempt must never deliver (or create) a second child"
+        );
+    }
+
+    // One `#[tokio::test]` function per injection point (rather than a single test looping over
+    // all five) keeps each test's real async spawn chain (harness setup + up to two real
+    // `Session::new` calls) shallow enough to fit the default test-thread stack. A single test
+    // looping over all five points in sequence was observed to overflow that default stack even
+    // though every individual point converges in one retry attempt; this codebase's spawn path is
+    // already known to need extra stack for deep instrumentation (see this crate's own
+    // `RUST_MIN_STACK=16777216` guidance for its integration test suite), and splitting the test
+    // avoids depending on that env var for the unit test suite.
+    async fn assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+        point: SpawnFailurePoint,
+    ) {
+        let harness = AgentControlHarness::new().await;
+        let state_db = harness
+            .state_db
+            .clone()
+            .expect("state db should initialize for a fresh test codex_home");
+        let coordination = CoordinationState::with_failure_injector(
+            Some(state_db),
+            SpawnFailureInjector::fail_at(point),
+        );
+        let control = harness
+            .control
+            .clone()
+            .with_coordination_enabled_for_tests(Arc::clone(&coordination));
+        let (root, _parent_thread) = harness.start_thread().await;
+        let key = coordination_key(root, "call-1");
+        let options = || SpawnAgentOptions {
+            parent_thread_id: Some(root),
+            ..Default::default()
+        };
+
+        control
+            .spawn_agent_coordinated(
+                key.clone(),
+                harness.config.clone(),
+                text_input("spawned"),
+                Some(thread_spawn_source(root)),
+                options(),
+            )
+            .await
+            .expect_err(&format!(
+                "injected failure at {point:?} should surface as an error"
+            ));
+
+        // Delivery (the controlled side effect the sender is acknowledged for) happens strictly
+        // after every one of the five injection points, so no failed attempt -- regardless of
+        // which boundary it failed at -- may have delivered anything yet.
+        assert_eq!(
+            harness.manager.captured_ops().len(),
+            0,
+            "no delivery must occur before the sender is acknowledged (failed at {point:?})"
+        );
+
+        // Reopen/retry: disarm injection on the same `Arc<CoordinationState>` so the retry
+        // resumes the same reservation ledger/operation identity map the failed attempt used,
+        // rather than starting a fresh operation. This is a same-process retry, not a full
+        // restart -- see `core/src/coordination/spawn_gate.rs`'s module doc comment for why a
+        // process-restart retry is out of scope for this in-memory ledger in this stage.
+        coordination.set_spawn_failure_injection_for_tests(SpawnFailureInjector::none());
+
+        // A failure exactly at `AfterSideEffectBeforeAck` leaves the just-created child
+        // undelivered; `SpawnAgentTransaction::drop` schedules an async shutdown+removal for it.
+        // Retry until that finishes and the preallocated thread id is free again, bounded so a
+        // real regression still fails the test instead of hanging.
+        let retry_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let live_agent = loop {
+            match control
+                .spawn_agent_coordinated(
+                    key.clone(),
+                    harness.config.clone(),
+                    text_input("spawned"),
+                    Some(thread_spawn_source(root)),
+                    options(),
+                )
+                .await
+            {
+                Ok(live_agent) => break live_agent,
+                Err(_) if tokio::time::Instant::now() < retry_deadline => {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!(
+                    "retry after injected failure at {point:?} should converge within 5s: {err}"
+                ),
+            }
+        };
+
+        harness
+            .manager
+            .get_thread(live_agent.thread_id)
+            .await
+            .expect("retry should converge on exactly one registered child");
+        let delivered = harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .filter(|(thread_id, _)| *thread_id == live_agent.thread_id)
+            .count();
+        assert_eq!(
+            delivered, 1,
+            "exactly one semantic fact (one delivery) must exist after convergence (failed at {point:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_failure_before_intent_leaves_no_delivery_and_a_retry_converges() {
+        assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+            SpawnFailurePoint::BeforeIntent,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn injected_failure_after_intent_leaves_no_delivery_and_a_retry_converges() {
+        assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+            SpawnFailurePoint::AfterIntent,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn injected_failure_after_receipt_leaves_no_delivery_and_a_retry_converges() {
+        assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+            SpawnFailurePoint::AfterReceipt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn injected_failure_before_child_creation_leaves_no_delivery_and_a_retry_converges() {
+        assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+            SpawnFailurePoint::BeforeChildCreation,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn injected_failure_after_side_effect_before_ack_leaves_no_delivery_and_a_retry_converges()
+     {
+        assert_injected_boundary_failure_leaves_no_delivery_and_a_retry_converges(
+            SpawnFailurePoint::AfterSideEffectBeforeAck,
+        )
+        .await;
+    }
+}
