@@ -70,12 +70,16 @@ impl std::fmt::Display for CoordinationOperationId {
 
 /// The semantic kind of operation a live-operation identity was allocated for.
 ///
-/// Only `Spawn` has a live producer in Stage 3.3. Later children (message/follow-up, interrupt,
-/// wait, detach) add their own variants alongside their own producers; do not add unused
-/// variants ahead of a real caller.
+/// `Spawn` has a live producer since Stage 3.3. `Message`/`Followup` (Stage 3.4,
+/// `core/src/agent/control/coordination_message.rs`) are this module's next real callers, mirroring
+/// the `QueueOnly`/`TriggerTurn` distinction `message_tool.rs` already encodes at the handler
+/// layer. Later children (interrupt, wait, detach) add their own variants alongside their own
+/// producers; do not add unused variants ahead of a real caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SemanticSlot {
     Spawn,
+    Message,
+    Followup,
 }
 
 /// Exact composite key naming one live coordination operation (Decision 5).

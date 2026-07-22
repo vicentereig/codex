@@ -57,6 +57,7 @@ use self::residency::V2Residency;
 #[cfg(test)]
 pub(crate) use self::spawn::SpawnAgentTransaction as SpawnTransaction;
 
+mod coordination_message;
 mod coordination_spawn;
 mod execution;
 mod legacy;

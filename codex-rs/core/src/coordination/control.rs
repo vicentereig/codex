@@ -10,9 +10,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use codex_coordination::StateEpoch;
 use codex_protocol::ThreadId;
 use codex_state::CoordinationAuthorityStatus;
 
+use super::message_gate::MessageFailureInjector;
+use super::message_gate::MessageFailurePoint;
+use super::message_gate::MessageGateError;
 use super::operation_identity::OperationIdentityMap;
 use super::spawn_gate::SpawnFailureInjector;
 use super::spawn_gate::SpawnFailurePoint;
@@ -80,6 +84,10 @@ pub(crate) struct CoordinationState {
     // `Arc<CoordinationState>` across a failed attempt and its retry, without losing the
     // reservation ledger/operation identity map that retry needs to resume from.
     spawn_failure_injector: Mutex<SpawnFailureInjector>,
+    // Same rationale as `spawn_failure_injector`, for the message/follow-up delivery
+    // orchestration (Stage 3.4). A distinct field/mutex so a test can arm spawn and message
+    // failure injection independently on the same shared state.
+    message_failure_injector: Mutex<MessageFailureInjector>,
     poisoned_roots: Mutex<HashSet<ThreadId>>,
 }
 
@@ -102,8 +110,30 @@ impl CoordinationState {
             operation_identity: OperationIdentityMap::new(),
             spawn_reservations: SpawnReservationLedger::new(),
             spawn_failure_injector: Mutex::new(spawn_failure_injector),
+            message_failure_injector: Mutex::new(MessageFailureInjector::none()),
             poisoned_roots: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Replace the message/follow-up failure injector on an already-`Arc`-shared coordination
+    /// state. Test-only, mirrors `set_spawn_failure_injection_for_tests`.
+    #[cfg(test)]
+    pub(crate) fn set_message_failure_injection_for_tests(&self, injector: MessageFailureInjector) {
+        *self
+            .message_failure_injector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = injector;
+    }
+
+    /// Check the currently-armed message/follow-up failure injector for `point`.
+    pub(crate) fn check_message_failure_injection(
+        &self,
+        point: MessageFailurePoint,
+    ) -> Result<(), MessageGateError> {
+        self.message_failure_injector
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .check(point)
     }
 
     #[cfg(test)]
@@ -167,6 +197,160 @@ impl CoordinationState {
             return Err(RootCoordinationError::Quarantined);
         }
         Ok(())
+    }
+
+    /// Resolve the `state_db`/current active state epoch pair used by every message/follow-up
+    /// delivery call below. Distinct from `ensure_root_usable`'s coarser check because callers of
+    /// this need the epoch value itself, not just a yes/no answer.
+    fn state_db_and_epoch(&self) -> Result<(&StateDbHandle, StateEpoch), RootCoordinationError> {
+        let state_db = self
+            .state_db
+            .as_ref()
+            .ok_or(RootCoordinationError::StateAbsent)?;
+        match state_db.coordination_authority() {
+            CoordinationAuthorityStatus::Active { state_epoch } => Ok((state_db, *state_epoch)),
+            CoordinationAuthorityStatus::Quarantined { .. } => {
+                Err(RootCoordinationError::Quarantined)
+            }
+        }
+    }
+
+    /// Capture a queue-only `send_message` receipt (Decision 9). See
+    /// `codex_state::capture_queue_message_receipt` for the fencing/convergence contract.
+    pub(crate) async fn capture_queue_message_receipt(
+        &self,
+        root_thread_id: ThreadId,
+        params: codex_state::CaptureQueueMessageReceipt,
+    ) -> Result<codex_state::CaptureReceiptOutcome, MessageGateError> {
+        let (state_db, epoch) = self.state_db_and_epoch()?;
+        Ok(
+            codex_state::capture_queue_message_receipt(state_db, root_thread_id, epoch, params)
+                .await?,
+        )
+    }
+
+    /// Reserve+accept the next sequential generation for a `followup_task` target and capture its
+    /// receipt, atomically (Decision 9). See `codex_state::accept_followup_generation`.
+    pub(crate) async fn accept_followup_generation(
+        &self,
+        root_thread_id: ThreadId,
+        params: codex_state::AcceptFollowupGeneration,
+    ) -> Result<codex_state::CaptureReceiptOutcome, MessageGateError> {
+        let (state_db, epoch) = self.state_db_and_epoch()?;
+        Ok(
+            codex_state::accept_followup_generation(state_db, root_thread_id, epoch, params)
+                .await?,
+        )
+    }
+
+    /// Advance a receipt from `committed` to `enqueued` -- the controlled queue side effect.
+    pub(crate) async fn mark_receipt_enqueued(
+        &self,
+        receipt_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<(), MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        codex_state::mark_receipt_enqueued(state_db, receipt_id, now_ms).await?;
+        Ok(())
+    }
+
+    /// Restart recovery, case 1: every receipt still `committed` (not yet enqueued) for
+    /// `root_thread_id`.
+    pub(crate) async fn pending_committed_receipts(
+        &self,
+        root_thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<Vec<codex_state::MessageReceipt>, MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        Ok(codex_state::pending_committed_receipts(state_db, root_thread_id, limit).await?)
+    }
+
+    /// Commit a receipt-to-response-item materialization row (Decision 9).
+    pub(crate) async fn commit_materialization(
+        &self,
+        root_thread_id: ThreadId,
+        receipt_id: uuid::Uuid,
+        target_turn_id: &str,
+        response_item_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<codex_state::MessageMaterialization, MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        Ok(codex_state::commit_materialization(
+            state_db,
+            root_thread_id,
+            receipt_id,
+            target_turn_id,
+            response_item_id,
+            now_ms,
+        )
+        .await?)
+    }
+
+    /// Restart recovery, case 2: advance `committed` -> `rollout_appended` once the append has
+    /// actually landed.
+    pub(crate) async fn mark_materialization_rollout_appended(
+        &self,
+        receipt_id: uuid::Uuid,
+        target_turn_id: &str,
+        response_item_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<(), MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        codex_state::mark_materialization_rollout_appended(
+            state_db,
+            receipt_id,
+            target_turn_id,
+            response_item_id,
+            now_ms,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Restart recovery, case 3: advance `rollout_appended` -> `selected` once the item has
+    /// actually been selected into a prompt.
+    pub(crate) async fn mark_materialization_selected(
+        &self,
+        receipt_id: uuid::Uuid,
+        target_turn_id: &str,
+        response_item_id: uuid::Uuid,
+        now_ms: i64,
+    ) -> Result<(), MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        codex_state::mark_materialization_selected(
+            state_db,
+            receipt_id,
+            target_turn_id,
+            response_item_id,
+            now_ms,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Restart recovery, case 2 query: every materialization still `committed` for
+    /// `root_thread_id`.
+    pub(crate) async fn pending_committed_materializations(
+        &self,
+        root_thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<Vec<codex_state::MessageMaterialization>, MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        Ok(
+            codex_state::pending_committed_materializations(state_db, root_thread_id, limit)
+                .await?,
+        )
+    }
+
+    /// Restart recovery, case 3 query: every materialization `rollout_appended` (selectable, not
+    /// yet `selected`) for `root_thread_id`.
+    pub(crate) async fn pending_appended_materializations(
+        &self,
+        root_thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<Vec<codex_state::MessageMaterialization>, MessageGateError> {
+        let (state_db, _epoch) = self.state_db_and_epoch()?;
+        Ok(codex_state::pending_appended_materializations(state_db, root_thread_id, limit).await?)
     }
 }
 

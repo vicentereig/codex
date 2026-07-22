@@ -23,8 +23,23 @@ pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
+pub use runtime::AcceptFollowupGeneration;
+pub use runtime::CaptureQueueMessageReceipt;
+pub use runtime::CaptureReceiptOutcome;
 pub use runtime::CoordinationAuthorityStatus;
 pub use runtime::FreshAfterCorruption;
+pub use runtime::MaterializationStatus;
+/// Crate-external facade for the Stage 3.4 message/follow-up receipt-ref mailbox
+/// and receipt-to-response-item materialization (`codex-9u5.2.3.4`). Not a
+/// general-purpose API: it exists only so `core/src/coordination/message_gate.rs`
+/// and `core/src/agent/control/coordination_message.rs` can be test-driven
+/// against durable receipt/materialization/generation state. See
+/// `runtime/coordination/message_api.rs` for the full contract.
+pub use runtime::MessageDeliveryError;
+pub use runtime::MessageMaterialization;
+pub use runtime::MessageReceipt;
+pub use runtime::MessageReceiptStatus;
+pub use runtime::MessageSemanticSlot;
 pub use runtime::RuntimeDbFreshStart;
 /// Crate-external facade for the Stage 3 coordination sidecar dispatcher
 /// (`codex-9u5.2.3.2`). Not a general-purpose API: it is deliberately narrow
@@ -41,9 +56,18 @@ pub use runtime::SidecarResolveOutcome;
 pub use runtime::SidecarStateError;
 /// Preferred entrypoint: owns configuration and metrics.
 pub use runtime::StateRuntime;
+pub use runtime::accept_followup_generation;
 pub use runtime::active_state_epoch;
+pub use runtime::capture_queue_message_receipt;
 pub use runtime::claim_degradation_publications;
 pub use runtime::claim_native_publications;
+pub use runtime::commit_materialization;
+pub use runtime::mark_materialization_rollout_appended;
+pub use runtime::mark_materialization_selected;
+pub use runtime::mark_receipt_enqueued;
+pub use runtime::pending_appended_materializations;
+pub use runtime::pending_committed_materializations;
+pub use runtime::pending_committed_receipts;
 pub use runtime::persist_root_sidecar_path;
 pub use runtime::resolve_degradation_publication;
 pub use runtime::resolve_native_publication;

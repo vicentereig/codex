@@ -16,11 +16,14 @@
 //! preallocation).
 
 mod control;
+mod message_gate;
 mod operation_identity;
 mod spawn_gate;
 
 pub(crate) use control::CoordinationControl;
 pub(crate) use control::CoordinationState;
+pub(crate) use message_gate::MessageFailureInjector;
+pub(crate) use message_gate::MessageFailurePoint;
 pub(crate) use operation_identity::OperationIdentityKey;
 pub(crate) use operation_identity::SemanticSlot;
 pub(crate) use spawn_gate::SpawnFailureInjector;

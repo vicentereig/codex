@@ -33,6 +33,7 @@ mod legacy_checkpoints;
 mod legacy_degradations;
 mod legacy_links;
 mod maintenance_degradation;
+mod message_api;
 mod projection_outbox;
 mod recovery;
 mod recovery_batch;
@@ -48,6 +49,24 @@ pub(crate) use authority::initialize_authority;
 #[cfg(test)]
 pub(crate) use authority_marker::MARKER_FILE_NAME;
 pub(crate) use authority_marker::prepare_fresh_after_corruption_marker;
+pub use message_api::AcceptFollowupGeneration;
+pub use message_api::CaptureQueueMessageReceipt;
+pub use message_api::CaptureReceiptOutcome;
+pub use message_api::MaterializationStatus;
+pub use message_api::MessageDeliveryError;
+pub use message_api::MessageMaterialization;
+pub use message_api::MessageReceipt;
+pub use message_api::MessageReceiptStatus;
+pub use message_api::MessageSemanticSlot;
+pub use message_api::accept_followup_generation;
+pub use message_api::capture_queue_message_receipt;
+pub use message_api::commit_materialization;
+pub use message_api::mark_materialization_rollout_appended;
+pub use message_api::mark_materialization_selected;
+pub use message_api::mark_receipt_enqueued;
+pub use message_api::pending_appended_materializations;
+pub use message_api::pending_committed_materializations;
+pub use message_api::pending_committed_receipts;
 pub use sidecar_api::SidecarClaimOutcome;
 pub use sidecar_api::SidecarDegradationLease;
 pub use sidecar_api::SidecarProjectionLease;
@@ -201,6 +220,9 @@ mod inclusion_retry_tests;
 #[cfg(test)]
 #[path = "inclusion_terminal_gate_tests.rs"]
 mod inclusion_terminal_gate_tests;
+#[cfg(test)]
+#[path = "message_api_tests.rs"]
+mod message_api_tests;
 #[cfg(test)]
 #[path = "projection_outbox_tests.rs"]
 mod projection_outbox_tests;
